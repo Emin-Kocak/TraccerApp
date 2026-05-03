@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">TraccerApp</string>
+    <string name="accessibility_description">Used to detect app launches and block usage when daily limits are reached.</string>
+</resources>
