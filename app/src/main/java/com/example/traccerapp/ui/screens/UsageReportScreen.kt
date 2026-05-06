@@ -3,8 +3,10 @@ package com.example.traccerapp.ui.screens
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.Canvas
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -13,36 +15,35 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.traccerapp.ui.theme.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Calendar
+import com.example.traccerapp.utils.AppIconUtils
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.Image
+// ── Veri modelleri ──────────────────────────────────────────
 
-val TraccerGreen = Color(0xFF4CAF50)
-val TraccerCyan = Color(0xFF00BCD4)
-val TraccerLightCyan = Color(0xFFE0F7FA)
-val TraccerGray = Color.Gray
-
-// Birleştirilmiş oturum — tek uygulama veya Idle Time
 data class MergedSession(
-    val startTime: String,   // "09:03"
-    val endTime: String,     // "09:25"
+    val startTime: String,
+    val endTime: String,
     val appName: String,
+    val packageName: String = "",
     val durationSeconds: Int,
     val color: Color,
     val initial: String,
@@ -59,13 +60,10 @@ sealed class TimelineItem {
     data class ActiveHour(val block: HourBlock) : TimelineItem()
 }
 
+// ── Yardımcı fonksiyonlar ───────────────────────────────────
+
 fun colorForApp(appName: String): Color {
-    val colors = listOf(
-        Color(0xFF4CAF50), Color(0xFF2196F3), Color(0xFFE91E63),
-        Color(0xFFFF5722), Color(0xFF9C27B0), Color(0xFF00BCD4),
-        Color(0xFFFF9800), Color(0xFF607D8B), Color(0xFF795548)
-    )
-    return colors[Math.abs(appName.hashCode()) % colors.size]
+    return AppColors[Math.abs(appName.hashCode()) % AppColors.size]
 }
 
 fun formatHour(hour: Int): String = when {
@@ -80,27 +78,23 @@ fun formatSeconds(totalSeconds: Int): String {
     val m = (totalSeconds % 3600) / 60
     val s = totalSeconds % 60
     return when {
-        h > 0 -> "${h}h ${m}m"
-        m > 0 -> "${m}m ${s}s"
-        else -> "${s}s"
+        h > 0 -> "${h}s ${m}dk"
+        m > 0 -> "${m}dk ${s}sn"
+        else -> "${s}sn"
     }
 }
 
 fun formatTime(timeMs: Long): String {
     val cal = Calendar.getInstance()
     cal.timeInMillis = timeMs
-    val h = cal.get(Calendar.HOUR_OF_DAY)
-    val m = cal.get(Calendar.MINUTE)
-    return String.format("%02d:%02d", h, m)
+    return String.format("%02d:%02d", cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
 }
 
-// Ham event'lerden birleştirilmiş oturumlar üret
 data class RawEvent(val pkg: String, val appName: String, val startMs: Long, val endMs: Long)
 
 suspend fun fetchTodayHourBlocks(context: Context): List<HourBlock> =
     withContext(Dispatchers.IO) {
         val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-        val pm = context.packageManager
 
         val calendar = Calendar.getInstance()
         val endTime = calendar.timeInMillis
@@ -110,7 +104,6 @@ suspend fun fetchTodayHourBlocks(context: Context): List<HourBlock> =
         calendar.set(Calendar.MILLISECOND, 0)
         val startTime = calendar.timeInMillis
 
-        // 1. Ham event'leri topla
         val rawEvents = mutableListOf<RawEvent>()
         val openTimes = mutableMapOf<String, Long>()
         val events = usm.queryEvents(startTime, endTime)
@@ -119,103 +112,78 @@ suspend fun fetchTodayHourBlocks(context: Context): List<HourBlock> =
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
             val pkg = event.packageName ?: continue
-            if (pkg == context.packageName) continue
+
+            // Sistem uygulamalarını ve takip edilmemesi gerekenleri filtrele
+            if (!AppIconUtils.shouldTrack(context, pkg)) continue
 
             when (event.eventType) {
-                UsageEvents.Event.ACTIVITY_RESUMED -> {
-                    openTimes[pkg] = event.timeStamp
-                }
+                UsageEvents.Event.ACTIVITY_RESUMED -> openTimes[pkg] = event.timeStamp
                 UsageEvents.Event.ACTIVITY_PAUSED -> {
                     val openMs = openTimes[pkg] ?: continue
                     val durationMs = event.timeStamp - openMs
-                    if (durationMs < 1000) {
-                        openTimes.remove(pkg)
-                        continue
-                    }
-                    val appName = try {
-                        pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
-                    } catch (e: Exception) {
-                        pkg.substringAfterLast(".")
-                    }
+                    if (durationMs < 1000) { openTimes.remove(pkg); continue }
+
+                    // GET_META_DATA ile doğru uygulama adı al
+                    val appName = AppIconUtils.getAppName(context, pkg)
+
                     rawEvents.add(RawEvent(pkg, appName, openMs, event.timeStamp))
                     openTimes.remove(pkg)
                 }
             }
         }
 
-        // Zamana göre sırala
         rawEvents.sortBy { it.startMs }
 
-        // 2. Ardışık aynı uygulamaları birleştir + Idle Time ekle
         val mergedAll = mutableListOf<MergedSession>()
-
         var i = 0
         while (i < rawEvents.size) {
             val current = rawEvents[i]
-
-            // Bir önceki oturumun bitişiyle bu oturumun başlangıcı arasında boşluk varsa Idle Time ekle
             if (mergedAll.isNotEmpty()) {
                 val lastEndMs = rawEvents[i - 1].endMs
                 val gapSeconds = ((current.startMs - lastEndMs) / 1000).toInt()
                 if (gapSeconds >= 5) {
-                    mergedAll.add(
-                        MergedSession(
-                            startTime = formatTime(lastEndMs),
-                            endTime = formatTime(current.startMs),
-                            appName = "Idle Time",
-                            durationSeconds = gapSeconds,
-                            color = TraccerGray,
-                            initial = "I",
-                            isIdle = true
-                        )
-                    )
+                    mergedAll.add(MergedSession(
+                        startTime = formatTime(lastEndMs),
+                        endTime = formatTime(current.startMs),
+                        appName = "Boşta",
+                        packageName = current.pkg,
+                        durationSeconds = gapSeconds,
+                        color = DarkBorder,
+                        initial = "I",
+                        isIdle = true
+                    ))
                 }
             }
-
-            // Aynı uygulamanın ardışık oturumlarını birleştir
             var mergedEnd = current.endMs
             var j = i + 1
             while (j < rawEvents.size &&
                 rawEvents[j].pkg == current.pkg &&
-                (rawEvents[j].startMs - mergedEnd) < 30_000L // 30 saniye içinde başlıyorsa birleştir
-            ) {
+                (rawEvents[j].startMs - mergedEnd) < 30_000L) {
                 mergedEnd = rawEvents[j].endMs
                 j++
             }
-
             val totalSec = ((mergedEnd - current.startMs) / 1000).toInt()
-            mergedAll.add(
-                MergedSession(
-                    startTime = formatTime(current.startMs),
-                    endTime = formatTime(mergedEnd),
-                    appName = current.appName,
-                    durationSeconds = totalSec,
-                    color = colorForApp(current.appName),
-                    initial = current.appName.firstOrNull()?.uppercase() ?: "?",
-                    isIdle = false
-                )
-            )
+            mergedAll.add(MergedSession(
+                startTime = formatTime(current.startMs),
+                endTime = formatTime(mergedEnd),
+                appName = current.appName,
+                durationSeconds = totalSec,
+                color = colorForApp(current.appName),
+                initial = current.appName.firstOrNull()?.uppercase() ?: "?",
+                isIdle = false
+            ))
             i = j
         }
 
-        // 3. Saatlere böl
         val hourMap = mutableMapOf<Int, MutableList<MergedSession>>()
         for (h in 0..23) hourMap[h] = mutableListOf()
-
         for (session in mergedAll) {
-            val sessionCal = Calendar.getInstance()
-            sessionCal.timeInMillis = 0
-            // startTime string'ini parse et
-            val parts = session.startTime.split(":")
-            val hour = parts[0].toIntOrNull() ?: 0
+            val hour = session.startTime.split(":")[0].toIntOrNull() ?: 0
             hourMap[hour]?.add(session)
         }
 
-        (0..23).map { hour ->
-            HourBlock(hour = hour, sessions = hourMap[hour] ?: emptyList())
-        }
+        (0..23).map { hour -> HourBlock(hour, hourMap[hour] ?: emptyList()) }
     }
-
 fun buildTimelineItems(blocks: List<HourBlock>): List<TimelineItem> {
     val result = mutableListOf<TimelineItem>()
     var emptyStart: Int? = null
@@ -234,7 +202,7 @@ fun buildTimelineItems(blocks: List<HourBlock>): List<TimelineItem> {
     return result
 }
 
-// ===================== ANA EKRAN =====================
+// ── Özet Ekranı ─────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -251,11 +219,8 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit) {
     }
 
     val totalSeconds = remember(hourBlocks) {
-        hourBlocks.flatMap { it.sessions }
-            .filter { !it.isIdle }
-            .sumOf { it.durationSeconds }
+        hourBlocks.flatMap { it.sessions }.filter { !it.isIdle }.sumOf { it.durationSeconds }
     }
-
     val topApps = remember(hourBlocks) {
         hourBlocks.flatMap { it.sessions }
             .filter { !it.isIdle }
@@ -265,159 +230,300 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit) {
     }
 
     Scaffold(
+        containerColor = DarkBg,
         topBar = {
             TopAppBar(
-                title = { Text("Usage Report") },
-                navigationIcon = {
-                    IconButton(onClick = {}) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
-                    }
-                },
+                title = { Text("Zaman Raporu", style = MaterialTheme.typography.titleLarge) },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBg),
                 actions = {
                     IconButton(onClick = { refreshTrigger++ }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(DarkElevated),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Yenile", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
             )
-        },
-        containerColor = Color.White
+        }
     ) { innerPadding ->
         if (isLoading) {
-            Box(
-                modifier = Modifier.fillMaxSize().padding(innerPadding),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(color = TraccerCyan)
+            Box(modifier = Modifier.fillMaxSize().padding(innerPadding), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = PurplePrimary, strokeWidth = 2.dp)
             }
         } else {
             LazyColumn(
-                modifier = Modifier.padding(innerPadding).fillMaxSize()
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                item { Spacer(modifier = Modifier.height(4.dp)) }
+
+                // Ana özet kartı
                 item {
-                    SummaryCard(
+                    ProSummaryHeroCard(
                         totalSeconds = totalSeconds,
-                        topApps = topApps,
-                        onCardClick = onNavigateToDetail  // Karta tıklayınca ayrı ekrana git
+                        onDetailClick = onNavigateToDetail
                     )
                 }
+
+                // En çok kullanılan 2 uygulama
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        ProTopAppCard(
+                            modifier = Modifier.weight(1f),
+                            label = "EN ÇOK KULLANILAN",
+                            entry = topApps.getOrNull(0)
+                        )
+                        ProTopAppCard(
+                            modifier = Modifier.weight(1f),
+                            label = "2. EN ÇOK",
+                            entry = topApps.getOrNull(1)
+                        )
+                    }
+                }
+
+                // Uygulama sıralaması
+                if (topApps.isNotEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(DarkSurface)
+                                .padding(20.dp)
+                        ) {
+                            Column {
+                                Text("Uygulama Sıralaması", style = MaterialTheme.typography.titleMedium)
+                                Spacer(modifier = Modifier.height(16.dp))
+                                val maxSec = topApps.maxOfOrNull { it.value } ?: 1
+                                topApps.take(6).forEachIndexed { index, entry ->
+                                    ProRankRow(
+                                        rank = index + 1,
+                                        appName = entry.key,
+                                        durationSeconds = entry.value,
+                                        progress = entry.value.toFloat() / maxSec,
+                                        color = AppColors[index % AppColors.size]
+                                    )
+                                    if (index < minOf(5, topApps.size - 1)) {
+                                        HorizontalDivider(
+                                            color = DarkBorder,
+                                            modifier = Modifier.padding(vertical = 10.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                item { Spacer(modifier = Modifier.height(8.dp)) }
             }
         }
     }
 }
 
-// ===================== ÖZET KART =====================
-
 @Composable
-fun SummaryCard(
-    totalSeconds: Int,
-    topApps: List<Map.Entry<String, Int>>,
-    onCardClick: () -> Unit
-) {
+fun ProSummaryHeroCard(totalSeconds: Int, onDetailClick: () -> Unit) {
     val maxSeconds = 6 * 3600
-    val sweepAngle = (270f * (totalSeconds.toFloat() / maxSeconds)).coerceIn(0f, 270f)
+    val progress = (totalSeconds.toFloat() / maxSeconds).coerceIn(0f, 1f)
     val remainingSeconds = (maxSeconds - totalSeconds).coerceAtLeast(0)
 
-    Card(
+    Box(
         modifier = Modifier
-            .padding(16.dp)
             .fillMaxWidth()
-            .clickable { onCardClick() },
-        shape = RoundedCornerShape(16.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White)
+            .clip(RoundedCornerShape(24.dp))
+            .background(
+                Brush.radialGradient(
+                    colors = listOf(PurpleDim, DarkElevated),
+                    radius = 900f
+                )
+            )
+            .clickable { onDetailClick() }
+            .padding(24.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(160.dp)) {
-                Canvas(modifier = Modifier.size(150.dp)) {
-                    drawCircle(color = Color(0xFFEEEEEE), style = Stroke(width = 16.dp.toPx()))
-                    drawArc(
-                        color = TraccerCyan,
-                        startAngle = -90f,
-                        sweepAngle = sweepAngle,
-                        useCenter = false,
-                        style = Stroke(width = 16.dp.toPx(), cap = StrokeCap.Round)
+        Column {
+            // Üst etiket
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(PurplePrimary)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    "BUGÜN · ${formatSeconds(totalSeconds)} kullanıldı",
+                    color = PurpleLight,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Kalan süre büyük yazı
+            Text(
+                text = formatSeconds(remainingSeconds),
+                color = TextPrimary,
+                fontSize = 44.sp,
+                fontWeight = FontWeight.Bold,
+                lineHeight = 44.sp
+            )
+            Text("kaldı (6 saatlik hedef)", color = TextSecondary, fontSize = 12.sp)
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Progress bar
+            Column {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(DarkBg)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(progress)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(
+                                Brush.horizontalGradient(listOf(PurplePrimary, PurpleLight))
+                            )
                     )
                 }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(formatSeconds(remainingSeconds), color = TraccerGreen, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                    Text("LEFT", color = TraccerGreen, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("0", color = TextHint, fontSize = 10.sp)
+                    Text("6 saat", color = TextHint, fontSize = 10.sp)
                 }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                Column(horizontalAlignment = Alignment.Start) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Surface(modifier = Modifier.size(8.dp), shape = CircleShape, color = TraccerGreen) {}
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("USAGE TIME", color = TraccerGray, fontSize = 10.sp, letterSpacing = 1.sp)
-                    }
-                    Row(verticalAlignment = Alignment.Bottom) {
-                        Text(formatSeconds(totalSeconds), color = TraccerGreen, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                        Text("/6H", color = TraccerGray, fontSize = 13.sp)
-                    }
-                }
-                Column(horizontalAlignment = Alignment.Start) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Surface(modifier = Modifier.size(8.dp), shape = CircleShape, color = TraccerCyan) {}
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("SESSIONS", color = TraccerGray, fontSize = 10.sp, letterSpacing = 1.sp)
-                    }
-                    Row(verticalAlignment = Alignment.Bottom) {
-                        Text(topApps.size.toString(), color = TraccerCyan, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                        Text(" uygulama", color = TraccerGray, fontSize = 13.sp)
-                    }
-                }
+            // Detay butonu
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(PurplePrimary.copy(alpha = 0.2f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Timeline, contentDescription = null, tint = PurpleLight, modifier = Modifier.size(14.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Saatlik detayları gör", color = PurpleLight, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Icon(Icons.Default.ChevronRight, contentDescription = null, tint = PurpleLight, modifier = Modifier.size(14.dp))
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-            Text("Screen time - Today (00:00–now).", color = TraccerGray, fontSize = 11.sp)
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = Color.LightGray)
-
-            Row(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                    if (topApps.isNotEmpty()) {
-                        val top = topApps.first()
-                        AppIconLarge(top.key.firstOrNull()?.uppercase() ?: "?", colorForApp(top.key))
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(top.key, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text(formatSeconds(top.value), color = TraccerGray, fontSize = 10.sp)
-                    } else {
-                        Text("📦", fontSize = 28.sp)
-                        Text("No Data", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    }
-                    Text("MOST USED APP", color = TraccerGray, fontSize = 10.sp)
-                }
-                VerticalDivider(modifier = Modifier.height(70.dp).width(1.dp), color = Color.LightGray)
-                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                    if (topApps.size >= 2) {
-                        val second = topApps[1]
-                        AppIconLarge(second.key.firstOrNull()?.uppercase() ?: "?", colorForApp(second.key))
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(second.key, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text(formatSeconds(second.value), color = TraccerGray, fontSize = 10.sp)
-                    } else {
-                        Text("📦", fontSize = 28.sp)
-                        Text("No Data", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    }
-                    Text("2nd MOST USED", color = TraccerGray, fontSize = 10.sp)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-            Text("This is based on today's usage.", color = TraccerGray, fontSize = 11.sp)
-            Spacer(modifier = Modifier.height(4.dp))
-            Text("Detayları görmek için dokun →", color = TraccerCyan, fontSize = 11.sp)
         }
     }
 }
 
-// ===================== DETAY EKRANI =====================
+@Composable
+fun ProTopAppCard(modifier: Modifier, label: String, entry: Map.Entry<String, Int>?) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(DarkSurface)
+            .padding(16.dp)
+    ) {
+        Column {
+            Text(label, color = TextHint, fontSize = 9.sp, letterSpacing = 1.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(modifier = Modifier.height(12.dp))
+            if (entry != null) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(colorForApp(entry.key).copy(alpha = 0.2f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        entry.key.firstOrNull()?.uppercase() ?: "?",
+                        color = colorForApp(entry.key),
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(entry.key, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(formatSeconds(entry.value), color = PurpleLight, fontSize = 12.sp)
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(DarkElevated),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.HourglassEmpty, contentDescription = null, tint = TextHint, modifier = Modifier.size(20.dp))
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Veri yok", color = TextHint, fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+@Composable
+fun ProRankRow(rank: Int, appName: String, durationSeconds: Int, progress: Float, color: Color) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = "$rank",
+            color = TextHint,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(20.dp),
+            textAlign = TextAlign.Center
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(color.copy(alpha = 0.2f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(appName.firstOrNull()?.uppercase() ?: "?", color = color, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(appName, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(formatSeconds(durationSeconds), color = TextSecondary, fontSize = 12.sp)
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(DarkBorder)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(progress)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(color)
+                )
+            }
+        }
+    }
+}
+
+// ── Detay Ekranı ─────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -436,137 +542,242 @@ fun UsageDetailScreen(onBack: () -> Unit) {
     val timelineItems = remember(hourBlocks) { buildTimelineItems(hourBlocks) }
 
     Scaffold(
+        containerColor = DarkBg,
         topBar = {
             TopAppBar(
-                title = { Text("Günlük Detay") },
+                title = { Text("Saatlik Detay", style = MaterialTheme.typography.titleLarge) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(DarkElevated),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Geri", tint = TextPrimary, modifier = Modifier.size(18.dp))
+                        }
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBg),
                 actions = {
                     IconButton(onClick = { refreshTrigger++ }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(DarkElevated),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Yenile", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
             )
-        },
-        containerColor = Color.White
+        }
     ) { innerPadding ->
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize().padding(innerPadding), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = TraccerCyan)
+                CircularProgressIndicator(color = PurplePrimary, strokeWidth = 2.dp)
             }
         } else {
-            LazyColumn(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item { Spacer(modifier = Modifier.height(4.dp)) }
                 items(timelineItems) { item ->
                     when (item) {
-                        is TimelineItem.EmptyRange -> EmptyRangeRow(item)
-                        is TimelineItem.ActiveHour -> ActiveHourRow(item.block)
+                        is TimelineItem.EmptyRange -> ProEmptyRangeRow(item)
+                        is TimelineItem.ActiveHour -> ProActiveHourRow(item.block)
                     }
                 }
+                item { Spacer(modifier = Modifier.height(8.dp)) }
             }
         }
     }
 }
 
-// ===================== TIMELINE SATIRLAR =====================
-
 @Composable
-fun EmptyRangeRow(item: TimelineItem.EmptyRange) {
+fun ProEmptyRangeRow(item: TimelineItem.EmptyRange) {
     val label = if (item.startHour == item.endHour)
-        "${formatHour(item.startHour)} — No activity"
+        formatHour(item.startHour)
     else
-        "${formatHour(item.startHour)} – ${formatHour(item.endHour)} — No activity"
+        "${formatHour(item.startHour)} – ${formatHour(item.endHour)}"
 
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(DarkSurface.copy(alpha = 0.5f))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, color = Color.LightGray, fontSize = 12.sp)
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(20.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(DarkBorder)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(label, color = TextHint, fontSize = 12.sp)
         Spacer(modifier = Modifier.weight(1f))
-        Box(modifier = Modifier.width(2.dp).height(20.dp).background(Color.LightGray))
-        Spacer(modifier = Modifier.width(60.dp))
+        Text("Kullanım yok", color = TextHint, fontSize = 11.sp)
     }
 }
 
 @Composable
-fun ActiveHourRow(block: HourBlock) {
+fun ProActiveHourRow(block: HourBlock) {
     var expanded by remember { mutableStateOf(false) }
-    val arrowRotation by animateFloatAsState(
-        targetValue = if (expanded) 180f else 0f,
-        label = "arrow"
-    )
-    val totalText = remember(block) {
-        formatSeconds(block.sessions.filter { !it.isIdle }.sumOf { it.durationSeconds })
+    val arrowRotation by animateFloatAsState(targetValue = if (expanded) 180f else 0f, label = "arrow")
+
+    val activeSeconds = remember(block) {
+        block.sessions.filter { !it.isIdle }.sumOf { it.durationSeconds }
     }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(if (expanded) TraccerLightCyan else Color.Transparent)
-            .clickable { expanded = !expanded }
+            .clip(RoundedCornerShape(16.dp))
+            .background(DarkSurface)
     ) {
         // Saat başlık satırı
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(formatHour(block.hour), color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.width(80.dp))
-
-            Box(modifier = Modifier.width(60.dp), contentAlignment = Alignment.Center) {
-                Box(modifier = Modifier.width(2.dp).height(36.dp).background(TraccerCyan).align(Alignment.Center))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    block.sessions.filter { !it.isIdle }.take(3).forEach {
-                        AppIconSmall(it.initial, it.color)
-                    }
-                    Icon(
-                        imageVector = Icons.Default.ExpandMore,
-                        contentDescription = null,
-                        tint = TraccerCyan,
-                        modifier = Modifier.size(14.dp).rotate(arrowRotation)
+            // Sol: mor şerit + saat
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(36.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(
+                        Brush.verticalGradient(listOf(PurplePrimary, PurpleLight))
                     )
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(formatHour(block.hour), color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("${block.sessions.size} oturum", color = TextSecondary, fontSize = 11.sp)
+            }
+
+            // Uygulama ikonları
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                block.sessions.filter { !it.isIdle }.take(3).forEach { session ->
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(session.color.copy(alpha = 0.25f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(session.initial, color = session.color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
+                if (block.sessions.filter { !it.isIdle }.size > 3) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(DarkElevated),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("+${block.sessions.filter { !it.isIdle }.size - 3}", color = TextSecondary, fontSize = 10.sp)
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
                 }
             }
 
-            Text(totalText, color = Color.Black, fontSize = 12.sp, modifier = Modifier.weight(1f), textAlign = TextAlign.End)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(formatSeconds(activeSeconds), color = PurpleLight, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(
+                Icons.Default.ExpandMore,
+                contentDescription = null,
+                tint = TextHint,
+                modifier = Modifier.size(18.dp).rotate(arrowRotation)
+            )
         }
 
-        // Açılır oturum detayları
-        if (expanded) {
-            block.sessions.forEach { session ->
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Saat
-                    Text(
-                        text = session.startTime,
-                        color = Color.Black,
-                        fontSize = 12.sp,
-                        modifier = Modifier.width(80.dp)
-                    )
+        // Açılır detay
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(),
+            exit = shrinkVertically()
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(DarkElevated)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                block.sessions.forEach { session ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Sol şerit (idle için gri, normal için mor)
+                        Box(
+                            modifier = Modifier
+                                .width(3.dp)
+                                .height(44.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(if (session.isIdle) DarkBorder else session.color)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
 
-                    // İkon + dikey çizgi
-                    Box(modifier = Modifier.width(60.dp), contentAlignment = Alignment.Center) {
-                        Box(modifier = Modifier.width(2.dp).height(52.dp).background(if (session.isIdle) Color.LightGray else TraccerCyan).align(Alignment.Center))
-                        if (!session.isIdle) {
-                            AppIconLarge(session.initial, session.color)
+                        if (session.isIdle) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(DarkSurface),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.HourglassEmpty, contentDescription = null, tint = TextHint, modifier = Modifier.size(16.dp))
+                            }
+                        } else {
+                            AppIcon(
+                                packageName = session.packageName,
+                                appName = session.appName,
+                                color = session.color,
+                                size = 36,
+                                cornerRadius = 10
+                            )
                         }
-                    }
 
-                    // Uygulama adı ve süre
-                    Column(modifier = Modifier.weight(1f)) {
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        // Uygulama adı ve süre
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                session.appName,
+                                color = if (session.isIdle) TextHint else TextPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                "${session.startTime} – ${session.endTime}",
+                                color = TextHint,
+                                fontSize = 11.sp
+                            )
+                        }
+
                         Text(
-                            text = session.appName,
-                            color = Color.Black,  // Siyah yazı
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = "${session.startTime} – ${session.endTime}  •  ${formatSeconds(session.durationSeconds)}",
-                            color = Color.Gray,
-                            fontSize = 11.sp
+                            formatSeconds(session.durationSeconds),
+                            color = if (session.isIdle) TextHint else PurpleLight,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
                         )
                     }
                 }
@@ -576,19 +787,55 @@ fun ActiveHourRow(block: HourBlock) {
 }
 
 @Composable
-fun AppIconSmall(initial: String, color: Color) {
-    Surface(modifier = Modifier.size(20.dp).padding(1.dp), shape = CircleShape, color = color) {
-        Box(contentAlignment = Alignment.Center) {
-            Text(initial, color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+fun AppIcon(
+    packageName: String,
+    appName: String,
+    color: Color,
+    size: Int = 36,
+    cornerRadius: Int = 10
+) {
+    val context = LocalContext.current
+    val bitmap = remember(packageName) {
+        try {
+            if (packageName.isNotEmpty()) {
+                val drawable = context.packageManager.getApplicationIcon(packageName)
+                val bmp = android.graphics.Bitmap.createBitmap(
+                    drawable.intrinsicWidth.coerceAtLeast(1),
+                    drawable.intrinsicHeight.coerceAtLeast(1),
+                    android.graphics.Bitmap.Config.ARGB_8888
+                )
+                val canvas = android.graphics.Canvas(bmp)
+                drawable.setBounds(0, 0, canvas.width, canvas.height)
+                drawable.draw(canvas)
+                bmp
+            } else null
+        } catch (e: Exception) {
+            null
         }
     }
-}
 
-@Composable
-fun AppIconLarge(initial: String, color: Color) {
-    Surface(modifier = Modifier.size(32.dp), shape = CircleShape, color = color) {
-        Box(contentAlignment = Alignment.Center) {
-            Text(initial, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+    Box(
+        modifier = Modifier
+            .size(size.dp)
+            .clip(RoundedCornerShape(cornerRadius.dp))
+            .background(if (bitmap == null) color.copy(alpha = 0.2f) else Color.Transparent),
+        contentAlignment = Alignment.Center
+    ) {
+        if (bitmap != null) {
+            androidx.compose.foundation.Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = appName,
+                modifier = Modifier
+                    .size(size.dp)
+                    .clip(RoundedCornerShape(cornerRadius.dp))
+            )
+        } else {
+            Text(
+                text = appName.firstOrNull()?.uppercase() ?: "?",
+                color = color,
+                fontSize = (size * 0.38f).sp,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }

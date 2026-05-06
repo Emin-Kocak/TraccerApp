@@ -27,6 +27,8 @@ import com.example.traccerapp.ui.theme.TraccerAppTheme
 
 import com.example.traccerapp.ui.screens.UsageReportScreen
 import com.example.traccerapp.ui.screens.UsageDetailScreen
+import com.example.traccerapp.ui.screens.minimal.MinimalMainScreen
+import com.example.traccerapp.ui.screens.pro.ProMainScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,64 +82,16 @@ fun MainContainer(
     onStartService: () -> Unit,
     checkPermissions: () -> Boolean,
     requestPermission: () -> Unit
-) {
-    var hasPermission by remember { checkPermissions(); mutableStateOf(checkPermissions()) }
-    var selectedScreen by remember { mutableIntStateOf(0) }
-    var showDetail by remember { mutableStateOf(false) }
+){
+    // Buradan istediğin UI'ı seç:
+    // MinimalMainScreen veya ProMainScreen
 
-    // Detay ekranı açıksa onu göster
-    if (showDetail) {
-        UsageDetailScreen(onBack = { showDetail = false })
-        return
-    }
+    // Minimal UI:
+    //MinimalMainScreen(onStartService, checkPermissions, requestPermission)
 
-    Scaffold(
-        bottomBar = {
-            if (hasPermission) {
-                NavigationBar {
-                    NavigationBarItem(
-                        selected = selectedScreen == 0,
-                        onClick = { selectedScreen = 0 },
-                        icon = { Icon(Icons.Default.Timeline, contentDescription = null) },
-                        label = { Text("Takip") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedScreen == 1,
-                        onClick = { selectedScreen = 1 },
-                        icon = { Icon(Icons.Default.BarChart, contentDescription = null) },
-                        label = { Text("Raporlar") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedScreen == 3,
-                        onClick = { selectedScreen = 3 },
-                        icon = { Icon(Icons.Default.Timeline, contentDescription = null) },
-                        label = { Text("Detay") }
-                    )
-                    NavigationBarItem(
-                        selected = selectedScreen == 2,
-                        onClick = { selectedScreen = 2 },
-                        icon = { Icon(Icons.Default.Block, contentDescription = null) },
-                        label = { Text("Bloklama") }
-                    )
-                }
-            }
-        }
-    ) { innerPadding ->
-        Box(modifier = Modifier.padding(innerPadding)) {
-            if (!hasPermission) {
-                PermissionRequestScreen(requestPermission)
-            } else {
-                when (selectedScreen) {
-                    0 -> UsageScreen(onStartService)
-                    1 -> ReportsScreen()
-                    2 -> BlockingSettingsScreen()
-                    3 -> UsageReportScreen(onNavigateToDetail = { showDetail = true })
-                }
-            }
-        }
-    }
+    // Profesyonel UI:
+    ProMainScreen(onStartService, checkPermissions, requestPermission)
 }
-
 @Composable
 fun PermissionRequestScreen(requestPermission: () -> Unit) {
     Column(

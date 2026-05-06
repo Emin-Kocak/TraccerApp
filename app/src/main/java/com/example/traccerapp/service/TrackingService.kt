@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import com.example.traccerapp.MainActivity
 import com.example.traccerapp.data.AppDatabase
 import com.example.traccerapp.data.UsageLog
+import com.example.traccerapp.utils.AppIconUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,9 +24,9 @@ class TrackingService : Service() {
     private val CHANNEL_ID = "TrackingServiceChannel"
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
-    
+
     private val handler = Handler(Looper.getMainLooper())
-    private val checkInterval = 1000L // Check every 1 second
+    private val checkInterval = 60_000L
 
     private lateinit var usageStatsManager: UsageStatsManager
     private lateinit var db: AppDatabase
@@ -62,22 +63,32 @@ class TrackingService : Service() {
 
         if (stats != null) {
             serviceScope.launch {
-                val logs = mutableListOf<UsageLog>()
                 for (usageStats in stats) {
-                    if (usageStats.totalTimeInForeground > 0) {
-                        logs.add(
-                            UsageLog(
-                                packageName = usageStats.packageName,
-                                date = startTime,
-                                durationMs = usageStats.totalTimeInForeground
-                            )
+                    if (usageStats.totalTimeInForeground > 0 &&
+                        AppIconUtils.shouldTrack(this@TrackingService, usageStats.packageName)
+                    ) {
+                        val log = UsageLog(
+                            packageName = usageStats.packageName,
+                            date = startTime,
+                            durationMs = usageStats.totalTimeInForeground
                         )
+                        db.appUsageDao().insertUsageLog(log)
+                        checkLimitBreach(usageStats.packageName, usageStats.totalTimeInForeground)
                     }
                 }
-                if (logs.isNotEmpty()) {
-                    db.appUsageDao().insertUsageLogs(logs)
-                }
             }
+        }
+    }
+
+    private suspend fun checkLimitBreach(packageName: String, currentDuration: Long) {
+        val limit = db.appUsageDao().getLimitForApp(packageName)
+        if (limit != null && limit.isEnabled && currentDuration >= (limit.dailyLimitMinutes * 60 * 1000L)) {
+            val intent = Intent(this, com.example.traccerapp.BlockingActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra("packageName", packageName)
+            }
+            startActivity(intent)
         }
     }
 
@@ -105,10 +116,9 @@ class TrackingService : Service() {
             this, 0, notificationIntent,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
         )
-
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Traccer is active")
-            .setContentText("Monitoring your digital balance...")
+            .setContentTitle("Traccer aktif")
+            .setContentText("Ekran kullanımı izleniyor...")
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
