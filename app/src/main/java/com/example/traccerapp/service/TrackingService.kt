@@ -11,13 +11,12 @@ import android.os.Looper
 import androidx.core.app.NotificationCompat
 import com.example.traccerapp.MainActivity
 import com.example.traccerapp.data.AppDatabase
-import com.example.traccerapp.data.UsageLog
-import com.example.traccerapp.utils.AppIconUtils
+import com.example.traccerapp.data.FirestoreRepository
+import com.example.traccerapp.utils.UsageStatsUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import java.util.*
 
 class TrackingService : Service() {
 
@@ -25,11 +24,13 @@ class TrackingService : Service() {
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
 
-    private val handler = Handler(Looper.getMainLooper())
-    private val checkInterval = 60_000L
+    // ✅ FIX: 30 saniye interval'e düşür (canlı hissi için)
+    private val checkInterval = 30000L // 30 seconds
 
+    private lateinit var handler: Handler
     private lateinit var usageStatsManager: UsageStatsManager
     private lateinit var db: AppDatabase
+    private lateinit var firestoreRepo: FirestoreRepository
 
     private val trackingRunnable = object : Runnable {
         override fun run() {
@@ -40,11 +41,13 @@ class TrackingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        handler = Handler(Looper.getMainLooper())
         usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
         db = AppDatabase.getDatabase(this)
+        firestoreRepo = FirestoreRepository(this)
         createNotificationChannel()
         startForeground(1, createNotification())
-        handler.post(trackingRunnable)
+        handler.post(trackingRunnable) // Hemen başla
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -52,54 +55,13 @@ class TrackingService : Service() {
     }
 
     private fun checkCurrentAppUsage() {
-        val endTime = System.currentTimeMillis()
-        val startTime = getStartOfDay(endTime)
-
-        val stats = usageStatsManager.queryUsageStats(
-            UsageStatsManager.INTERVAL_DAILY,
-            startTime,
-            endTime
-        )
-
-        if (stats != null) {
-            serviceScope.launch {
-                for (usageStats in stats) {
-                    if (usageStats.totalTimeInForeground > 0 &&
-                        AppIconUtils.shouldTrack(this@TrackingService, usageStats.packageName)
-                    ) {
-                        val log = UsageLog(
-                            packageName = usageStats.packageName,
-                            date = startTime,
-                            durationMs = usageStats.totalTimeInForeground
-                        )
-                        db.appUsageDao().insertUsageLog(log)
-                        checkLimitBreach(usageStats.packageName, usageStats.totalTimeInForeground)
-                    }
-                }
+        serviceScope.launch {
+            try {
+                UsageStatsUtils.fetchAndSaveUsageStats(this@TrackingService)
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
-    }
-
-    private suspend fun checkLimitBreach(packageName: String, currentDuration: Long) {
-        val limit = db.appUsageDao().getLimitForApp(packageName)
-        if (limit != null && limit.isEnabled && currentDuration >= (limit.dailyLimitMinutes * 60 * 1000L)) {
-            val intent = Intent(this, com.example.traccerapp.BlockingActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                putExtra("packageName", packageName)
-            }
-            startActivity(intent)
-        }
-    }
-
-    private fun getStartOfDay(time: Long): Long {
-        val calendar = Calendar.getInstance()
-        calendar.timeInMillis = time
-        calendar.set(Calendar.HOUR_OF_DAY, 0)
-        calendar.set(Calendar.MINUTE, 0)
-        calendar.set(Calendar.SECOND, 0)
-        calendar.set(Calendar.MILLISECOND, 0)
-        return calendar.timeInMillis
     }
 
     override fun onDestroy() {
@@ -114,11 +76,12 @@ class TrackingService : Service() {
         val notificationIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this, 0, notificationIntent,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+            PendingIntent.FLAG_IMMUTABLE
         )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Traccer aktif")
-            .setContentText("Ekran kullanımı izleniyor...")
+            .setContentTitle("Traccer Aktif")
+            .setContentText("Uygulama kullanımı takip ediliyor...")
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)

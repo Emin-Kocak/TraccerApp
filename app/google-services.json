@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "494016807742",
+    "project_id": "traccerapp-4242",
+    "storage_bucket": "traccerapp-4242.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:494016807742:android:34d80401ea3138da15e26f",
+        "android_client_info": {
+          "package_name": "com.example.traccerapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAa_4WGDY2mvXZHDBJK5RBS5Gf5TBHffeY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

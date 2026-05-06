@@ -15,8 +15,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,13 +30,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.traccerapp.data.UserPreferences
+import com.example.traccerapp.ui.components.RealAppIcon
 import com.example.traccerapp.ui.theme.*
+import com.example.traccerapp.utils.AppIconUtils
+import com.example.traccerapp.utils.AppInfoUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.Calendar
-import com.example.traccerapp.utils.AppIconUtils
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.foundation.Image
+import java.util.*
+
 // ── Veri modelleri ──────────────────────────────────────────
 
 data class MergedSession(
@@ -123,8 +125,7 @@ suspend fun fetchTodayHourBlocks(context: Context): List<HourBlock> =
                     val durationMs = event.timeStamp - openMs
                     if (durationMs < 1000) { openTimes.remove(pkg); continue }
 
-                    // GET_META_DATA ile doğru uygulama adı al
-                    val appName = AppIconUtils.getAppName(context, pkg)
+                    val appName = AppInfoUtils.getAppName(context, pkg)
 
                     rawEvents.add(RawEvent(pkg, appName, openMs, event.timeStamp))
                     openTimes.remove(pkg)
@@ -146,7 +147,7 @@ suspend fun fetchTodayHourBlocks(context: Context): List<HourBlock> =
                         startTime = formatTime(lastEndMs),
                         endTime = formatTime(current.startMs),
                         appName = "Boşta",
-                        packageName = current.pkg,
+                        packageName = "",
                         durationSeconds = gapSeconds,
                         color = DarkBorder,
                         initial = "I",
@@ -167,6 +168,7 @@ suspend fun fetchTodayHourBlocks(context: Context): List<HourBlock> =
                 startTime = formatTime(current.startMs),
                 endTime = formatTime(mergedEnd),
                 appName = current.appName,
+                packageName = current.pkg,
                 durationSeconds = totalSec,
                 color = colorForApp(current.appName),
                 initial = current.appName.firstOrNull()?.uppercase() ?: "?",
@@ -206,8 +208,9 @@ fun buildTimelineItems(blocks: List<HourBlock>): List<TimelineItem> {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun UsageReportScreen(onNavigateToDetail: () -> Unit) {
+fun UsageReportScreen(onNavigateToDetail: () -> Unit, onBack: (() -> Unit)? = null) {
     val context = LocalContext.current
+    val prefs = remember { UserPreferences(context) }
     var hourBlocks by remember { mutableStateOf<List<HourBlock>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var refreshTrigger by remember { mutableIntStateOf(0) }
@@ -224,9 +227,12 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit) {
     val topApps = remember(hourBlocks) {
         hourBlocks.flatMap { it.sessions }
             .filter { !it.isIdle }
-            .groupBy { it.appName }
-            .mapValues { (_, s) -> s.sumOf { it.durationSeconds } }
-            .entries.sortedByDescending { it.value }
+            .groupBy { it.packageName }
+            .mapValues { (_, s) -> 
+                val first = s.first()
+                Triple(first.appName, first.packageName, s.sumOf { it.durationSeconds })
+            }
+            .values.sortedByDescending { it.third }
     }
 
     Scaffold(
@@ -235,6 +241,21 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit) {
             TopAppBar(
                 title = { Text("Zaman Raporu", style = MaterialTheme.typography.titleLarge) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBg),
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(DarkElevated),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Geri", tint = TextPrimary, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                },
                 actions = {
                     IconButton(onClick = { refreshTrigger++ }) {
                         Box(
@@ -269,6 +290,7 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit) {
                 item {
                     ProSummaryHeroCard(
                         totalSeconds = totalSeconds,
+                        goalSeconds = prefs.dailyGoalSeconds,
                         onDetailClick = onNavigateToDetail
                     )
                 }
@@ -305,13 +327,14 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit) {
                             Column {
                                 Text("Uygulama Sıralaması", style = MaterialTheme.typography.titleMedium)
                                 Spacer(modifier = Modifier.height(16.dp))
-                                val maxSec = topApps.maxOfOrNull { it.value } ?: 1
+                                val maxSec = topApps.maxOfOrNull { it.third } ?: 1
                                 topApps.take(6).forEachIndexed { index, entry ->
                                     ProRankRow(
                                         rank = index + 1,
-                                        appName = entry.key,
-                                        durationSeconds = entry.value,
-                                        progress = entry.value.toFloat() / maxSec,
+                                        appName = entry.first,
+                                        packageName = entry.second,
+                                        durationSeconds = entry.third,
+                                        progress = entry.third.toFloat() / maxSec,
                                         color = AppColors[index % AppColors.size]
                                     )
                                     if (index < minOf(5, topApps.size - 1)) {
@@ -333,8 +356,8 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit) {
 }
 
 @Composable
-fun ProSummaryHeroCard(totalSeconds: Int, onDetailClick: () -> Unit) {
-    val maxSeconds = 6 * 3600
+fun ProSummaryHeroCard(totalSeconds: Int, goalSeconds: Int, onDetailClick: () -> Unit) {
+    val maxSeconds = goalSeconds
     val progress = (totalSeconds.toFloat() / maxSeconds).coerceIn(0f, 1f)
     val remainingSeconds = (maxSeconds - totalSeconds).coerceAtLeast(0)
 
@@ -380,7 +403,7 @@ fun ProSummaryHeroCard(totalSeconds: Int, onDetailClick: () -> Unit) {
                 fontWeight = FontWeight.Bold,
                 lineHeight = 44.sp
             )
-            Text("kaldı (6 saatlik hedef)", color = TextSecondary, fontSize = 12.sp)
+            Text("kaldı (${maxSeconds / 3600} saatlik hedef)", color = TextSecondary, fontSize = 12.sp)
 
             Spacer(modifier = Modifier.height(20.dp))
 
@@ -406,7 +429,7 @@ fun ProSummaryHeroCard(totalSeconds: Int, onDetailClick: () -> Unit) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("0", color = TextHint, fontSize = 10.sp)
-                    Text("6 saat", color = TextHint, fontSize = 10.sp)
+                    Text("${maxSeconds / 3600} saat", color = TextHint, fontSize = 10.sp)
                 }
             }
 
@@ -431,7 +454,7 @@ fun ProSummaryHeroCard(totalSeconds: Int, onDetailClick: () -> Unit) {
 }
 
 @Composable
-fun ProTopAppCard(modifier: Modifier, label: String, entry: Map.Entry<String, Int>?) {
+fun ProTopAppCard(modifier: Modifier, label: String, entry: Triple<String, String, Int>?) {
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
@@ -442,23 +465,10 @@ fun ProTopAppCard(modifier: Modifier, label: String, entry: Map.Entry<String, In
             Text(label, color = TextHint, fontSize = 9.sp, letterSpacing = 1.sp, fontWeight = FontWeight.SemiBold)
             Spacer(modifier = Modifier.height(12.dp))
             if (entry != null) {
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(colorForApp(entry.key).copy(alpha = 0.2f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        entry.key.firstOrNull()?.uppercase() ?: "?",
-                        color = colorForApp(entry.key),
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                RealAppIcon(packageName = entry.second, appName = entry.first, size = 40.dp, cornerRadius = 12.dp)
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(entry.key, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                Text(formatSeconds(entry.value), color = PurpleLight, fontSize = 12.sp)
+                Text(entry.first, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                Text(formatSeconds(entry.third), color = PurpleLight, fontSize = 12.sp)
             } else {
                 Box(
                     modifier = Modifier
@@ -477,7 +487,7 @@ fun ProTopAppCard(modifier: Modifier, label: String, entry: Map.Entry<String, In
 }
 
 @Composable
-fun ProRankRow(rank: Int, appName: String, durationSeconds: Int, progress: Float, color: Color) {
+fun ProRankRow(rank: Int, appName: String, packageName: String, durationSeconds: Int, progress: Float, color: Color) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             text = "$rank",
@@ -488,15 +498,7 @@ fun ProRankRow(rank: Int, appName: String, durationSeconds: Int, progress: Float
             textAlign = TextAlign.Center
         )
         Spacer(modifier = Modifier.width(12.dp))
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(color.copy(alpha = 0.2f)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(appName.firstOrNull()?.uppercase() ?: "?", color = color, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-        }
+        RealAppIcon(packageName = packageName, appName = appName, size = 36.dp, cornerRadius = 10.dp)
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -555,7 +557,7 @@ fun UsageDetailScreen(onBack: () -> Unit) {
                                 .background(DarkElevated),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Default.ArrowBack, contentDescription = "Geri", tint = TextPrimary, modifier = Modifier.size(18.dp))
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Geri", tint = TextPrimary, modifier = Modifier.size(18.dp))
                         }
                     }
                 },
@@ -672,15 +674,7 @@ fun ProActiveHourRow(block: HourBlock) {
             // Uygulama ikonları
             Row(verticalAlignment = Alignment.CenterVertically) {
                 block.sessions.filter { !it.isIdle }.take(3).forEach { session ->
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(session.color.copy(alpha = 0.25f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(session.initial, color = session.color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
+                    RealAppIcon(packageName = session.packageName, appName = session.appName, size = 28.dp, cornerRadius = 8.dp)
                     Spacer(modifier = Modifier.width(4.dp))
                 }
                 if (block.sessions.filter { !it.isIdle }.size > 3) {
@@ -747,13 +741,7 @@ fun ProActiveHourRow(block: HourBlock) {
                                 Icon(Icons.Default.HourglassEmpty, contentDescription = null, tint = TextHint, modifier = Modifier.size(16.dp))
                             }
                         } else {
-                            AppIcon(
-                                packageName = session.packageName,
-                                appName = session.appName,
-                                color = session.color,
-                                size = 36,
-                                cornerRadius = 10
-                            )
+                            RealAppIcon(packageName = session.packageName, appName = session.appName, size = 36.dp, cornerRadius = 10.dp)
                         }
 
                         Spacer(modifier = Modifier.width(12.dp))
@@ -782,60 +770,6 @@ fun ProActiveHourRow(block: HourBlock) {
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-fun AppIcon(
-    packageName: String,
-    appName: String,
-    color: Color,
-    size: Int = 36,
-    cornerRadius: Int = 10
-) {
-    val context = LocalContext.current
-    val bitmap = remember(packageName) {
-        try {
-            if (packageName.isNotEmpty()) {
-                val drawable = context.packageManager.getApplicationIcon(packageName)
-                val bmp = android.graphics.Bitmap.createBitmap(
-                    drawable.intrinsicWidth.coerceAtLeast(1),
-                    drawable.intrinsicHeight.coerceAtLeast(1),
-                    android.graphics.Bitmap.Config.ARGB_8888
-                )
-                val canvas = android.graphics.Canvas(bmp)
-                drawable.setBounds(0, 0, canvas.width, canvas.height)
-                drawable.draw(canvas)
-                bmp
-            } else null
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    Box(
-        modifier = Modifier
-            .size(size.dp)
-            .clip(RoundedCornerShape(cornerRadius.dp))
-            .background(if (bitmap == null) color.copy(alpha = 0.2f) else Color.Transparent),
-        contentAlignment = Alignment.Center
-    ) {
-        if (bitmap != null) {
-            androidx.compose.foundation.Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = appName,
-                modifier = Modifier
-                    .size(size.dp)
-                    .clip(RoundedCornerShape(cornerRadius.dp))
-            )
-        } else {
-            Text(
-                text = appName.firstOrNull()?.uppercase() ?: "?",
-                color = color,
-                fontSize = (size * 0.38f).sp,
-                fontWeight = FontWeight.Bold
-            )
         }
     }
 }

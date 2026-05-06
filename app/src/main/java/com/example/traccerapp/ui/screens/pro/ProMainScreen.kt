@@ -20,24 +20,38 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.traccerapp.data.AppDatabase
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.traccerapp.data.UsageLog
+import com.example.traccerapp.data.UserPreferences
+import com.example.traccerapp.ui.components.RealAppIcon
 import com.example.traccerapp.ui.screens.*
 import com.example.traccerapp.ui.theme.*
+import com.example.traccerapp.ui.viewmodel.UsageViewModel
 import com.example.traccerapp.utils.AppInfoUtils
-import java.util.Calendar
+import com.example.traccerapp.utils.UsageStatsUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 @Composable
 fun ProMainScreen(
-    onStartService: () -> Unit,
     checkPermissions: () -> Boolean,
     requestPermission: () -> Unit
 ) {
     var hasPermission by remember { mutableStateOf(checkPermissions()) }
     var selectedTab by remember { mutableIntStateOf(0) }
+    var showReport by remember { mutableStateOf(false) }
     var showDetail by remember { mutableStateOf(false) }
 
     if (showDetail) {
         UsageDetailScreen(onBack = { showDetail = false })
+        return
+    }
+
+    if (showReport) {
+        UsageReportScreen(
+            onNavigateToDetail = { showDetail = true },
+            onBack = { showReport = false }
+        )
         return
     }
 
@@ -52,9 +66,9 @@ fun ProMainScreen(
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
             when (selectedTab) {
-                0 -> ProDashboardTab(onStartService, onDetailClick = { showDetail = true })
+                0 -> ProDashboardTab(onDetailClick = { showReport = true })
                 1 -> ReportsScreen()
-                2 -> UsageReportScreen(onNavigateToDetail = { showDetail = true })
+                2 -> UsageScreen()
                 3 -> BlockingSettingsScreen()
             }
         }
@@ -70,7 +84,7 @@ fun ProBottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
         listOf(
             Triple(Icons.Default.Dashboard,  "Dashboard", 0),
             Triple(Icons.Default.BarChart,   "Raporlar",  1),
-            Triple(Icons.Default.AccessTime, "Zaman",     2),
+            Triple(Icons.Default.AccessTime, "Takip",     2),
             Triple(Icons.Default.Shield,     "Limitler",  3)
         ).forEach { (icon, label, index) ->
             NavigationBarItem(
@@ -103,18 +117,35 @@ fun ProBottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
 }
 
 @Composable
-fun ProDashboardTab(onStartService: () -> Unit, onDetailClick: () -> Unit) {
+fun ProDashboardTab(onDetailClick: () -> Unit, viewModel: UsageViewModel = viewModel()) {
     val context = LocalContext.current
-    val db = remember { AppDatabase.getDatabase(context) }
-    val today = remember {
-        Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
+    val prefs = remember { UserPreferences(context) }
+
+    val logsState by viewModel.todayUsageLogs.collectAsState()
+    val logs = logsState ?: emptyList()
+    val isLoading = logsState == null
+
+    var showGoalDialog by remember { mutableStateOf(false) }
+    var goalHours by remember { mutableIntStateOf(prefs.dailyGoalHours) }
+
+    LaunchedEffect(Unit) {
+        viewModel.refreshUsageStats()
     }
-    val logs by db.appUsageDao().getUsageLogsForDate(today).collectAsState(initial = emptyList())
+
+    if (showGoalDialog) {
+        GoalSettingsDialog(
+            currentGoal = goalHours,
+            onConfirm = { hours ->
+                goalHours = hours
+                prefs.dailyGoalHours = hours
+                showGoalDialog = false
+            },
+            onDismiss = { showGoalDialog = false }
+        )
+    }
+
     val totalMs = logs.sumOf { it.durationMs }
-    val topApp = logs.maxByOrNull { it.durationMs }
+    val topApp = logs.firstOrNull()
 
     Column(
         modifier = Modifier
@@ -129,20 +160,25 @@ fun ProDashboardTab(onStartService: () -> Unit, onDetailClick: () -> Unit) {
                 Text("Dashboard", style = MaterialTheme.typography.headlineLarge)
                 Text("Bugünkü özet", color = TextSecondary, fontSize = 13.sp)
             }
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(PurpleDim),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.Person, contentDescription = null, tint = PurplePrimary, modifier = Modifier.size(22.dp))
+            IconButton(onClick = { showGoalDialog = true }) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(PurpleDim),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Settings, contentDescription = "Hedef Ayarla", tint = PurplePrimary, modifier = Modifier.size(22.dp))
+                }
             }
         }
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Ana metrik kartı
+        val goalMs = goalHours * 3600 * 1000L
+        val progress = (totalMs.toFloat() / goalMs).coerceIn(0f, 1f)
+
+        // Ana kart
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -161,14 +197,20 @@ fun ProDashboardTab(onStartService: () -> Unit, onDetailClick: () -> Unit) {
                         modifier = Modifier
                             .size(8.dp)
                             .clip(CircleShape)
-                            .background(StatusGreen)
+                            .background(if (isLoading) StatusAmber else StatusGreen)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("CANLI TAKİP", color = StatusGreen, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.5.sp)
+                    Text(
+                        text = if (isLoading) "YÜKLENİYOR..." else "CANLI TAKİP",
+                        color = if (isLoading) StatusAmber else StatusGreen,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 1.5.sp
+                    )
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = AppInfoUtils.formatDuration(totalMs),
+                    text = if (isLoading) "—" else AppInfoUtils.formatDuration(totalMs),
                     color = TextPrimary,
                     fontSize = 42.sp,
                     fontWeight = FontWeight.Bold
@@ -176,12 +218,10 @@ fun ProDashboardTab(onStartService: () -> Unit, onDetailClick: () -> Unit) {
                 Text("toplam ekran süresi", color = TextSecondary, fontSize = 13.sp)
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // İlerleme çubuğu (6 saat hedef)
-                val progress = (totalMs.toFloat() / (6 * 3600 * 1000L)).coerceIn(0f, 1f)
                 Column {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Günlük Hedef", color = TextSecondary, fontSize = 11.sp)
-                        Text("6 saat", color = TextSecondary, fontSize = 11.sp)
+                        Text("$goalHours saat", color = TextSecondary, fontSize = 11.sp)
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Box(
@@ -196,9 +236,7 @@ fun ProDashboardTab(onStartService: () -> Unit, onDetailClick: () -> Unit) {
                                 .fillMaxWidth(progress)
                                 .fillMaxHeight()
                                 .clip(RoundedCornerShape(3.dp))
-                                .background(
-                                    Brush.horizontalGradient(listOf(PurplePrimary, PurpleLight))
-                                )
+                                .background(Brush.horizontalGradient(listOf(PurplePrimary, PurpleLight)))
                         )
                     }
                 }
@@ -207,19 +245,19 @@ fun ProDashboardTab(onStartService: () -> Unit, onDetailClick: () -> Unit) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Metrik grid
+        // Metric kartlar
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             ProMetricCard(
                 modifier = Modifier.weight(1f),
                 label = "Uygulama Sayısı",
-                value = "${logs.size}",
+                value = if (isLoading) "—" else "${logs.size}",
                 icon = Icons.Default.Apps,
                 accent = StatusBlue
             )
             ProMetricCard(
                 modifier = Modifier.weight(1f),
                 label = "En Çok Kullanılan",
-                value = if (topApp != null) AppInfoUtils.getAppName(context, topApp.packageName).take(10) else "—",
+                value = topApp?.appName?.take(10) ?: "—",
                 icon = Icons.Default.Star,
                 accent = StatusAmber
             )
@@ -239,52 +277,115 @@ fun ProDashboardTab(onStartService: () -> Unit, onDetailClick: () -> Unit) {
                 Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("Bugünkü Kullanım", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                     TextButton(onClick = onDetailClick) {
-                        Text("Tümü", color = PurplePrimary, fontSize = 12.sp)
+                        Text("Zaman Raporu", color = PurplePrimary, fontSize = 12.sp)
                         Icon(Icons.Default.ChevronRight, contentDescription = null, tint = PurplePrimary, modifier = Modifier.size(16.dp))
                     }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
 
-                if (logs.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(Icons.Default.HourglassEmpty, contentDescription = null, tint = TextHint, modifier = Modifier.size(36.dp))
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text("Henüz veri yok", color = TextHint, fontSize = 13.sp)
+                when {
+                    isLoading -> {
+                        // Kısa yükleme — telefon verisi çekilirken
+                        Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(color = PurplePrimary, modifier = Modifier.size(32.dp))
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text("Kullanım verisi alınıyor...", color = TextHint, fontSize = 13.sp)
+                            }
                         }
                     }
-                } else {
-                    val maxMs = logs.maxOfOrNull { it.durationMs } ?: 1L
-                    logs.sortedByDescending { it.durationMs }.take(6).forEachIndexed { index, log ->
-                        ProAppRow(
-                            name = AppInfoUtils.getAppName(context, log.packageName),
-                            duration = AppInfoUtils.formatDuration(log.durationMs),
-                            progress = log.durationMs.toFloat() / maxMs,
-                            color = AppColors[index % AppColors.size]
-                        )
-                        if (index < minOf(5, logs.size - 1)) {
-                            HorizontalDivider(color = DarkBorder, modifier = Modifier.padding(vertical = 8.dp))
+                    logs.isEmpty() -> {
+                        // Veri yok — büyük ihtimalle izin verilmemiş
+                        Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Default.Lock, contentDescription = null, tint = StatusRed, modifier = Modifier.size(36.dp))
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text("Veri bulunamadı", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "Ayarlar → Uygulamalar → Özel Erişim\n→ Kullanım Verilerine Erişim → Traccer → AÇ",
+                                    color = TextHint,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                    else -> {
+                        // ✅ Veri var — göster
+                        val maxMs = logs.maxOfOrNull { it.durationMs } ?: 1L
+                        logs.take(6).forEachIndexed { index, log ->
+                            ProAppRow(
+                                name = log.appName,
+                                packageName = log.packageName,
+                                duration = AppInfoUtils.formatDuration(log.durationMs),
+                                progress = log.durationMs.toFloat() / maxMs,
+                                color = AppColors[index % AppColors.size]
+                            )
+                            if (index < minOf(5, logs.size - 1)) {
+                                HorizontalDivider(color = DarkBorder, modifier = Modifier.padding(vertical = 8.dp))
+                            }
                         }
                     }
                 }
             }
         }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Servis butonu
-        Button(
-            onClick = onStartService,
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = PurplePrimary),
-            shape = RoundedCornerShape(14.dp),
-            contentPadding = PaddingValues(16.dp)
-        ) {
-            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Takip Servisini Başlat", fontWeight = FontWeight.SemiBold)
-        }
     }
+}
+
+@Composable
+fun GoalSettingsDialog(currentGoal: Int, onConfirm: (Int) -> Unit, onDismiss: () -> Unit) {
+    var hours by remember { mutableIntStateOf(currentGoal) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = DarkSurface,
+        title = { Text("Günlük Hedef", color = TextPrimary) },
+        text = {
+            Column {
+                Text("Günlük ekran süresi hedefini belirle:", color = TextSecondary, fontSize = 13.sp)
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    IconButton(onClick = { if (hours > 1) hours-- }) {
+                        Icon(Icons.Default.Remove, null, tint = PurpleLight)
+                    }
+                    Text("$hours saat", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = { if (hours < 12) hours++ }) {
+                        Icon(Icons.Default.Add, null, tint = PurpleLight)
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(2, 4, 6, 8).forEach { h ->
+                        FilterChip(
+                            selected = hours == h,
+                            onClick = { hours = h },
+                            label = { Text("${h}sa") },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = PurplePrimary,
+                                selectedLabelColor = Color.White
+                            )
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(hours) }) {
+                Text("Kaydet", color = PurplePrimary)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("İptal", color = TextSecondary)
+            }
+        }
+    )
 }
 
 @Composable
@@ -313,25 +414,12 @@ fun ProMetricCard(modifier: Modifier, label: String, value: String, icon: ImageV
 }
 
 @Composable
-fun ProAppRow(name: String, duration: String, progress: Float, color: Color) {
+fun ProAppRow(name: String, packageName: String, duration: String, progress: Float, color: Color) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(color.copy(alpha = 0.2f)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                name.firstOrNull()?.uppercase() ?: "?",
-                color = color,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
+        RealAppIcon(packageName = packageName, appName = name, size = 36.dp, cornerRadius = 10.dp)
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {

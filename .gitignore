@@ -1,0 +1,14 @@
+# Gradle ve Build dosyaları
+.gradle/
+/build/
+*/build/
+app/build/
+
+# IDE dosyaları (Android Studio)
+.idea/
+*.iml
+local.properties
+
+# İşletim sistemi dosyaları
+.DS_Store
+Thumbs.db
