@@ -21,16 +21,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.traccerapp.data.UsageLog
 import com.example.traccerapp.data.UserPreferences
 import com.example.traccerapp.ui.components.RealAppIcon
 import com.example.traccerapp.ui.screens.*
 import com.example.traccerapp.ui.theme.*
 import com.example.traccerapp.ui.viewmodel.UsageViewModel
 import com.example.traccerapp.utils.AppInfoUtils
-import com.example.traccerapp.utils.UsageStatsUtils
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+
+// ─── Navigasyon durumu ───────────────────────────────────────
+
+private sealed class Screen {
+    object Main : Screen()
+    object Report : Screen()
+    object Detail : Screen()
+    object Settings : Screen()
+}
+
+// ─── Ana ekran ───────────────────────────────────────────────
 
 @Composable
 fun ProMainScreen(
@@ -39,20 +46,26 @@ fun ProMainScreen(
 ) {
     var hasPermission by remember { mutableStateOf(checkPermissions()) }
     var selectedTab by remember { mutableIntStateOf(0) }
-    var showReport by remember { mutableStateOf(false) }
-    var showDetail by remember { mutableStateOf(false) }
+    var currentScreen by remember { mutableStateOf<Screen>(Screen.Main) }
 
-    if (showDetail) {
-        UsageDetailScreen(onBack = { showDetail = false })
-        return
-    }
-
-    if (showReport) {
-        UsageReportScreen(
-            onNavigateToDetail = { showDetail = true },
-            onBack = { showReport = false }
-        )
-        return
+    // Alt ekranlar
+    when (currentScreen) {
+        is Screen.Detail -> {
+            UsageDetailScreen(onBack = { currentScreen = Screen.Report })
+            return
+        }
+        is Screen.Report -> {
+            UsageReportScreen(
+                onNavigateToDetail = { currentScreen = Screen.Detail },
+                onBack = { currentScreen = Screen.Main }
+            )
+            return
+        }
+        is Screen.Settings -> {
+            AppSettingsScreen(onBack = { currentScreen = Screen.Main })
+            return
+        }
+        else -> Unit
     }
 
     if (!hasPermission) {
@@ -66,7 +79,10 @@ fun ProMainScreen(
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
             when (selectedTab) {
-                0 -> ProDashboardTab(onDetailClick = { showReport = true })
+                0 -> ProDashboardTab(
+                    onDetailClick = { currentScreen = Screen.Report },
+                    onSettingsClick = { currentScreen = Screen.Settings }
+                )
                 1 -> ReportsScreen()
                 2 -> UsageScreen()
                 3 -> BlockingSettingsScreen()
@@ -75,6 +91,8 @@ fun ProMainScreen(
     }
 }
 
+// ─── Bottom bar ──────────────────────────────────────────────
+
 @Composable
 fun ProBottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
     NavigationBar(
@@ -82,10 +100,10 @@ fun ProBottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
         tonalElevation = 0.dp
     ) {
         listOf(
-            Triple(Icons.Default.Dashboard,  "Dashboard", 0),
-            Triple(Icons.Default.BarChart,   "Raporlar",  1),
-            Triple(Icons.Default.AccessTime, "Takip",     2),
-            Triple(Icons.Default.Shield,     "Limitler",  3)
+            Triple(Icons.Default.Dashboard, "Dashboard", 0),
+            Triple(Icons.Default.BarChart, "Raporlar", 1),
+            Triple(Icons.Default.AccessTime, "Takip", 2),
+            Triple(Icons.Default.Shield, "Limitler", 3)
         ).forEach { (icon, label, index) ->
             NavigationBarItem(
                 selected = selectedTab == index,
@@ -116,32 +134,33 @@ fun ProBottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
     }
 }
 
+// ─── Dashboard tab ───────────────────────────────────────────
+
 @Composable
-fun ProDashboardTab(onDetailClick: () -> Unit, viewModel: UsageViewModel = viewModel()) {
+fun ProDashboardTab(
+    onDetailClick: () -> Unit,
+    onSettingsClick: () -> Unit,
+    viewModel: UsageViewModel = viewModel()
+) {
     val context = LocalContext.current
     val prefs = remember { UserPreferences(context) }
 
     val logsState by viewModel.todayUsageLogs.collectAsState()
-    val logs = logsState ?: emptyList()
     val isLoading = logsState == null
 
-    var showGoalDialog by remember { mutableStateOf(false) }
+    // Hidden packages'ı filtrele + minimum kullanım filtresi uygula
+    val logs = remember(logsState, prefs.hiddenPackages, prefs.minimumUsageMs) {
+        val hidden = prefs.hiddenPackages
+        val minMs = prefs.minimumUsageMs
+        (logsState ?: emptyList())
+            .filter { it.packageName !in hidden }
+            .filter { it.durationMs >= minMs }
+    }
+
     var goalHours by remember { mutableIntStateOf(prefs.dailyGoalHours) }
 
     LaunchedEffect(Unit) {
         viewModel.refreshUsageStats()
-    }
-
-    if (showGoalDialog) {
-        GoalSettingsDialog(
-            currentGoal = goalHours,
-            onConfirm = { hours ->
-                goalHours = hours
-                prefs.dailyGoalHours = hours
-                showGoalDialog = false
-            },
-            onDismiss = { showGoalDialog = false }
-        )
     }
 
     val totalMs = logs.sumOf { it.durationMs }
@@ -154,21 +173,27 @@ fun ProDashboardTab(onDetailClick: () -> Unit, viewModel: UsageViewModel = viewM
             .verticalScroll(rememberScrollState())
             .padding(20.dp)
     ) {
-        // Header
+        // Header — sağ üstte ayarlar ikonu
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("Dashboard", style = MaterialTheme.typography.headlineLarge)
                 Text("Bugünkü özet", color = TextSecondary, fontSize = 13.sp)
             }
-            IconButton(onClick = { showGoalDialog = true }) {
+            // Ayarlar ikonu
+            IconButton(onClick = onSettingsClick) {
                 Box(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(PurpleDim),
+                        .background(DarkSurface),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Settings, contentDescription = "Hedef Ayarla", tint = PurplePrimary, modifier = Modifier.size(22.dp))
+                    Icon(
+                        Icons.Default.Settings,
+                        contentDescription = "Ayarlar",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
         }
@@ -275,18 +300,29 @@ fun ProDashboardTab(onDetailClick: () -> Unit, viewModel: UsageViewModel = viewM
         ) {
             Column {
                 Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Bugünkü Kullanım", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    Text(
+                        "Bugünkü Kullanım",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f)
+                    )
                     TextButton(onClick = onDetailClick) {
                         Text("Zaman Raporu", color = PurplePrimary, fontSize = 12.sp)
-                        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = PurplePrimary, modifier = Modifier.size(16.dp))
+                        Icon(
+                            Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = PurplePrimary,
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
 
                 when {
                     isLoading -> {
-                        // Kısa yükleme — telefon verisi çekilirken
-                        Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 CircularProgressIndicator(color = PurplePrimary, modifier = Modifier.size(32.dp))
                                 Spacer(modifier = Modifier.height(12.dp))
@@ -295,10 +331,17 @@ fun ProDashboardTab(onDetailClick: () -> Unit, viewModel: UsageViewModel = viewM
                         }
                     }
                     logs.isEmpty() -> {
-                        // Veri yok — büyük ihtimalle izin verilmemiş
-                        Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(Icons.Default.Lock, contentDescription = null, tint = StatusRed, modifier = Modifier.size(36.dp))
+                                Icon(
+                                    Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = StatusRed,
+                                    modifier = Modifier.size(36.dp)
+                                )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text("Veri bulunamadı", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                                 Spacer(modifier = Modifier.height(4.dp))
@@ -311,7 +354,6 @@ fun ProDashboardTab(onDetailClick: () -> Unit, viewModel: UsageViewModel = viewM
                         }
                     }
                     else -> {
-                        // ✅ Veri var — göster
                         val maxMs = logs.maxOfOrNull { it.durationMs } ?: 1L
                         logs.take(6).forEachIndexed { index, log ->
                             ProAppRow(
@@ -332,61 +374,7 @@ fun ProDashboardTab(onDetailClick: () -> Unit, viewModel: UsageViewModel = viewM
     }
 }
 
-@Composable
-fun GoalSettingsDialog(currentGoal: Int, onConfirm: (Int) -> Unit, onDismiss: () -> Unit) {
-    var hours by remember { mutableIntStateOf(currentGoal) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = DarkSurface,
-        title = { Text("Günlük Hedef", color = TextPrimary) },
-        text = {
-            Column {
-                Text("Günlük ekran süresi hedefini belirle:", color = TextSecondary, fontSize = 13.sp)
-                Spacer(modifier = Modifier.height(16.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    IconButton(onClick = { if (hours > 1) hours-- }) {
-                        Icon(Icons.Default.Remove, null, tint = PurpleLight)
-                    }
-                    Text("$hours saat", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                    IconButton(onClick = { if (hours < 12) hours++ }) {
-                        Icon(Icons.Default.Add, null, tint = PurpleLight)
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    listOf(2, 4, 6, 8).forEach { h ->
-                        FilterChip(
-                            selected = hours == h,
-                            onClick = { hours = h },
-                            label = { Text("${h}sa") },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = PurplePrimary,
-                                selectedLabelColor = Color.White
-                            )
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(hours) }) {
-                Text("Kaydet", color = PurplePrimary)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("İptal", color = TextSecondary)
-            }
-        }
-    )
-}
+// ─── Yardımcı composable'lar ─────────────────────────────────
 
 @Composable
 fun ProMetricCard(modifier: Modifier, label: String, value: String, icon: ImageVector, accent: Color) {
@@ -471,7 +459,8 @@ fun ProPermissionScreen(onRequest: () -> Unit) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 "Ekran süresi verilerini görmek için kullanım istatistiklerine erişim izni vermeniz gerekiyor.",
-                color = TextSecondary, fontSize = 13.sp
+                color = TextSecondary,
+                fontSize = 13.sp
             )
             Spacer(modifier = Modifier.height(24.dp))
             Button(
@@ -484,4 +473,58 @@ fun ProPermissionScreen(onRequest: () -> Unit) {
             }
         }
     }
+}
+
+// GoalSettingsDialog — kullanılıyorsa kalsın (artık ayarlar ekranından da erişilebilir)
+@Composable
+fun GoalSettingsDialog(currentGoal: Int, onConfirm: (Int) -> Unit, onDismiss: () -> Unit) {
+    var hours by remember { mutableIntStateOf(currentGoal) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = DarkSurface,
+        title = { Text("Günlük Hedef", color = TextPrimary) },
+        text = {
+            Column {
+                Text("Günlük ekran süresi hedefini belirle:", color = TextSecondary, fontSize = 13.sp)
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    IconButton(onClick = { if (hours > 1) hours-- }) {
+                        Icon(Icons.Default.Remove, null, tint = PurpleLight)
+                    }
+                    Text("$hours saat", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = { if (hours < 16) hours++ }) {
+                        Icon(Icons.Default.Add, null, tint = PurpleLight)
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(2, 4, 6, 8).forEach { h ->
+                        FilterChip(
+                            selected = hours == h,
+                            onClick = { hours = h },
+                            label = { Text("${h}sa") },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = PurplePrimary,
+                                selectedLabelColor = Color.White
+                            )
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(hours) }) {
+                Text("Kaydet", color = PurplePrimary)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("İptal", color = TextSecondary)
+            }
+        }
+    )
 }
