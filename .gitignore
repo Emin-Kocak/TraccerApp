@@ -12,3 +12,9 @@ local.properties
 # İşletim sistemi dosyaları
 .DS_Store
 Thumbs.db
+
+# Gradle ve IDE önbellekleri
+.cxx/
+
+# IntelliJ / Android Studio proje dosyaları
+*.iws
