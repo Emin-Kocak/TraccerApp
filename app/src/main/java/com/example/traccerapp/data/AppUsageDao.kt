@@ -31,4 +31,13 @@ interface AppUsageDao {
 
     @Delete
     suspend fun deleteLimit(limit: AppLimit)
+
+    /**
+     * In-memory takipten gelen süreci DB'ye verimli şekilde yaz.
+     * REPLACE stratejisi (packageName, date) unique index'i üzerinden çalışır.
+     */
+    @Transaction
+    suspend fun upsertDurations(logs: List<UsageLog>) {
+        insertUsageLogs(logs) // OnConflictStrategy.REPLACE ile var olanın üzerine yazar
+    }
 }

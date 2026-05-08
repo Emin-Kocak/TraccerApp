@@ -1,4 +1,4 @@
-package com.example.traccerapp.ui.screens.pro
+package com.example.traccerapp.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -17,16 +17,19 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.traccerapp.data.AppDatabase
 import com.example.traccerapp.data.UserPreferences
 import com.example.traccerapp.ui.components.RealAppIcon
-import com.example.traccerapp.ui.screens.*
 import com.example.traccerapp.ui.theme.*
 import com.example.traccerapp.ui.viewmodel.UsageViewModel
 import com.example.traccerapp.utils.AppInfoUtils
+import java.util.*
 
 // ─── Navigasyon durumu ───────────────────────────────────────
 
@@ -42,11 +45,24 @@ private sealed class Screen {
 @Composable
 fun ProMainScreen(
     checkPermissions: () -> Boolean,
-    requestPermission: () -> Unit
+    requestPermission: () -> Unit,
+    isAccessibilityEnabled: () -> Boolean = { true },
+    requestAccessibility: () -> Unit = {}
 ) {
     var hasPermission by remember { mutableStateOf(checkPermissions()) }
+    var hasAccessibility by remember { mutableStateOf(isAccessibilityEnabled()) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var currentScreen by remember { mutableStateOf<Screen>(Screen.Main) }
+
+    // Ekran her resume olduğunda accessibility durumunu yeniden kontrol et
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleState by lifecycleOwner.lifecycle.currentStateFlow.collectAsState()
+    LaunchedEffect(lifecycleState) {
+        if (lifecycleState == Lifecycle.State.RESUMED) {
+            hasAccessibility = isAccessibilityEnabled()
+            hasPermission = checkPermissions()
+        }
+    }
 
     // Alt ekranlar
     when (currentScreen) {
@@ -77,19 +93,49 @@ fun ProMainScreen(
         containerColor = DarkBg,
         bottomBar = { ProBottomBar(selectedTab) { selectedTab = it } }
     ) { padding ->
-        Box(modifier = Modifier.padding(padding)) {
-            when (selectedTab) {
-                0 -> ProDashboardTab(
-                    onDetailClick = { currentScreen = Screen.Report },
-                    onSettingsClick = { currentScreen = Screen.Settings }
-                )
-                1 -> ReportsScreen()
-                2 -> UsageScreen()
-                3 -> BlockingSettingsScreen()
+        Column(modifier = Modifier.padding(padding)) {
+            // ⚠️ Erişilebilirlik servisi aktif değilse uyarı göster
+            if (!hasAccessibility) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF7C2D12))
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = Color(0xFFFBBF24),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        "Engelleme için Erişilebilirlik izni gerekli!",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = requestAccessibility) {
+                        Text("Aç", color = Color(0xFFFBBF24), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Box(modifier = Modifier.weight(1f)) {
+                when (selectedTab) {
+                    0 -> DashboardTab(
+                        onDetailClick = { currentScreen = Screen.Report },
+                        onSettingsClick = { currentScreen = Screen.Settings }
+                    )
+                    1 -> ReportsScreen()
+                    2 -> UsageScreen()
+                    3 -> BlockingSettingsScreen()
+                }
             }
         }
     }
 }
+
 
 // ─── Bottom bar ──────────────────────────────────────────────
 
@@ -137,15 +183,30 @@ fun ProBottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
 // ─── Dashboard tab ───────────────────────────────────────────
 
 @Composable
-fun ProDashboardTab(
+fun DashboardTab(
     onDetailClick: () -> Unit,
     onSettingsClick: () -> Unit,
     viewModel: UsageViewModel = viewModel()
 ) {
     val context = LocalContext.current
     val prefs = remember { UserPreferences(context) }
+    val db = remember { AppDatabase.getDatabase(context) }
 
-    val logsState by viewModel.todayUsageLogs.collectAsState()
+    // Başlangıç zamanını hesapla
+    val todayStart = remember {
+        Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+    }
+
+    // DB'den doğrudan bugünün loglarını oku (ReportsScreen gibi)
+    val logsFlow = remember(todayStart) {
+        db.appUsageDao().getUsageLogsForDate(todayStart)
+    }
+    val logsState by logsFlow.collectAsState(initial = null)
     val isLoading = logsState == null
 
     // Hidden packages'ı filtrele + minimum kullanım filtresi uygula
@@ -159,6 +220,7 @@ fun ProDashboardTab(
 
     var goalHours by remember { mutableIntStateOf(prefs.dailyGoalHours) }
 
+    // Veriyi yenile - DB'ye kaydetmek için
     LaunchedEffect(Unit) {
         viewModel.refreshUsageStats()
     }

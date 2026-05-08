@@ -8,11 +8,13 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
+import android.view.accessibility.AccessibilityManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import com.example.traccerapp.service.AppAccessibilityService
 import com.example.traccerapp.service.TrackingService
-import com.example.traccerapp.ui.screens.pro.ProMainScreen
+import com.example.traccerapp.ui.screens.ProMainScreen
 import com.example.traccerapp.ui.theme.TraccerAppTheme
 
 class MainActivity : ComponentActivity() {
@@ -30,7 +32,9 @@ class MainActivity : ComponentActivity() {
             TraccerAppTheme {
                 ProMainScreen(
                     checkPermissions = { hasUsageStatsPermission() },
-                    requestPermission = { requestUsageStatsPermission() }
+                    requestPermission = { requestUsageStatsPermission() },
+                    isAccessibilityEnabled = { isAccessibilityServiceEnabled() },
+                    requestAccessibility = { requestAccessibilityPermission() }
                 )
             }
         }
@@ -47,8 +51,22 @@ class MainActivity : ComponentActivity() {
         return mode == AppOpsManager.MODE_ALLOWED
     }
 
+    fun isAccessibilityServiceEnabled(): Boolean {
+        val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
+        val enabledServices = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        val componentName = "${packageName}/${AppAccessibilityService::class.java.name}"
+        return enabledServices.split(":").any { it.equals(componentName, ignoreCase = true) }
+    }
+
     private fun requestUsageStatsPermission() {
         startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+    }
+
+    fun requestAccessibilityPermission() {
+        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 
     private fun startTrackingService() {

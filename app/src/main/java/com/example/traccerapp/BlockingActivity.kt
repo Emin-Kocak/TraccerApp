@@ -3,7 +3,9 @@ package com.example.traccerapp
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,14 +21,37 @@ import com.example.traccerapp.ui.components.RealAppIcon
 import com.example.traccerapp.ui.theme.TraccerAppTheme
 
 class BlockingActivity : ComponentActivity() {
+
+    private val packageNameState = mutableStateOf("")
+    private val appNameState = mutableStateOf("Uygulama")
+    private val reasonState = mutableStateOf("Süren doldu")
+
+    private fun goHome() {
+        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        startActivity(homeIntent)
+        finish()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val packageName = intent.getStringExtra("packageName") ?: ""
-        val appName = intent.getStringExtra("appName") ?: "Uygulama"
-        val reason = intent.getStringExtra("reason") ?: "Süren doldu"
+        // Intent'ten gelen verileri state'e yaz
+        updateFromIntent(intent)
+
+        // Geri tuşu engelle
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                goHome()
+            }
+        })
 
         setContent {
+            val packageName = packageNameState.value
+            val appName = appNameState.value
+            val reason = reasonState.value
             TraccerAppTheme {
                 Column(
                     modifier = Modifier
@@ -58,13 +83,7 @@ class BlockingActivity : ComponentActivity() {
                     Spacer(modifier = Modifier.height(48.dp))
 
                     Button(
-                        onClick = {
-                            val startMain = Intent(Intent.ACTION_MAIN)
-                            startMain.addCategory(Intent.CATEGORY_HOME)
-                            startMain.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                            startActivity(startMain)
-                            finish()
-                        },
+                        onClick = { goHome() },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED)),
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.fillMaxWidth(0.6f)
@@ -74,5 +93,17 @@ class BlockingActivity : ComponentActivity() {
                 }
             }
         }
+    }
+    // singleTop modunda tekrar açılınca çağrılır
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        updateFromIntent(intent)
+    }
+
+    private fun updateFromIntent(intent: Intent) {
+        packageNameState.value = intent.getStringExtra("packageName") ?: ""
+        appNameState.value = intent.getStringExtra("appName") ?: "Uygulama"
+        reasonState.value = intent.getStringExtra("reason") ?: "Süren doldu"
     }
 }

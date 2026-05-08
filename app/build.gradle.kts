@@ -2,12 +2,11 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.google.ksp)
-    alias(libs.plugins.google.services)
 }
 
 android {
     namespace = "com.example.traccerapp"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.example.traccerapp"
@@ -38,12 +37,8 @@ android {
 }
 
 dependencies {
-    implementation("com.google.firebase:firebase-analytics")
-    implementation(platform("com.google.firebase:firebase-bom:34.12.0"))
-    implementation(platform(libs.firebase.bom))
-    implementation(libs.firebase.firestore)
+    implementation("androidx.savedstate:savedstate-ktx:1.4.0") // Sürüm değişebilir, en günceli kullan.
     implementation(libs.androidx.material.icons.extended)
-
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -58,6 +53,9 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
+
+    // WorkManager
+    implementation(libs.androidx.work.runtime.ktx)
 
     // Vico Charts
     implementation(libs.vico.compose)

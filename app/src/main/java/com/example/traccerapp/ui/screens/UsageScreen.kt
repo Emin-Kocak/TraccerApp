@@ -18,6 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.traccerapp.data.AppDatabase
 import com.example.traccerapp.ui.components.RealAppIcon
 import com.example.traccerapp.ui.viewmodel.UsageViewModel
 import com.example.traccerapp.ui.theme.*
@@ -25,13 +26,29 @@ import com.example.traccerapp.utils.AppInfoUtils
 import com.example.traccerapp.utils.UsageStatsUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UsageScreen(viewModel: UsageViewModel = viewModel()) {
     val context = LocalContext.current
+    val db = remember { AppDatabase.getDatabase(context) }
     
-    val logs by viewModel.todayUsageLogs.collectAsState()
+    // Başlangıç zamanını hesapla
+    val todayStart = remember {
+        Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+    }
+    
+    // DB'den doğrudan bugünün loglarını oku
+    val logsFlow = remember(todayStart) {
+        db.appUsageDao().getUsageLogsForDate(todayStart)
+    }
+    val logs by logsFlow.collectAsState(initial = null)
     
     LaunchedEffect(Unit) {
         viewModel.refreshUsageStats()

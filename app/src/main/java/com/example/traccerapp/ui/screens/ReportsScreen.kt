@@ -16,19 +16,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.traccerapp.ui.components.RealAppIcon
-import com.example.traccerapp.data.FirestoreRepository
+import com.example.traccerapp.data.AppDatabase
 import com.example.traccerapp.data.UsageLog
 import com.example.traccerapp.ui.theme.*
 import com.example.traccerapp.utils.AppInfoUtils
-import java.text.SimpleDateFormat
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReportsScreen() {
     val context = LocalContext.current
-    val firestoreRepo = remember { FirestoreRepository(context) }
-    
+    val db = remember { AppDatabase.getDatabase(context) }
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf("Bugün", "Haftalık", "Aylık")
 
@@ -65,16 +63,22 @@ fun ReportsScreen() {
                 }
             }
 
+            // Room DAO üzerinden verilerin çekilmesi
             val logsFlow = remember(selectedTab) {
-                when (indexToRange(selectedTab)) {
-                    null -> firestoreRepo.getTodayLogs()
-                    else -> {
-                        val range = indexToRange(selectedTab)!!
-                        firestoreRepo.getLogsForDateRange(range.first, range.second)
-                    }
+                val range = indexToRange(selectedTab)
+                if (range == null) {
+                    // Bugünün başlangıç zamanını hesapla
+                    val today = Calendar.getInstance().apply {
+                        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+                        set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+                    }.timeInMillis
+                    db.appUsageDao().getUsageLogsForDate(today)
+                } else {
+                    // Belirli bir aralık için sorgu
+                    db.appUsageDao().getUsageLogsBetween(range.first, range.second)
                 }
             }
-            
+
             val logs by logsFlow.collectAsState(initial = null)
 
             if (logs == null) {
@@ -132,20 +136,22 @@ fun ReportAppRow(packageName: String, appName: String, durationMs: Long) {
     }
 }
 
-fun indexToRange(index: Int): Pair<String, String>? {
-    val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-    val cal = Calendar.getInstance()
-    val end = sdf.format(cal.time)
-    
+fun indexToRange(index: Int): Pair<Long, Long>? {
+    val cal = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }
+    val end = cal.timeInMillis
+
     return when (index) {
-        0 -> null // Today uses special call
-        1 -> {
+        0 -> null // Bugün için özel kontrol
+        1 -> { // Haftalık
             cal.add(Calendar.DAY_OF_YEAR, -7)
-            Pair(sdf.format(cal.time), end)
+            Pair(cal.timeInMillis, end)
         }
-        2 -> {
+        2 -> { // Aylık
             cal.add(Calendar.MONTH, -1)
-            Pair(sdf.format(cal.time), end)
+            Pair(cal.timeInMillis, end)
         }
         else -> null
     }

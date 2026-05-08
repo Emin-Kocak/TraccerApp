@@ -3,7 +3,6 @@ package com.example.traccerapp.ui.screens
 import android.app.TimePickerDialog
 import android.content.Context
 import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -26,8 +25,11 @@ import androidx.compose.ui.unit.sp
 import com.example.traccerapp.ui.components.RealAppIcon
 import com.example.traccerapp.data.AppDatabase
 import com.example.traccerapp.data.AppLimit
+import com.example.traccerapp.data.UserPreferences
 import com.example.traccerapp.ui.theme.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -36,10 +38,18 @@ fun BlockingSettingsScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val db = remember { AppDatabase.getDatabase(context) }
-    
-    val allApps = remember { getInstalledApps(context) }
+    val prefs = remember { UserPreferences(context) }
+
+    // Uygulama listesini arka planda yükle
+    var allApps by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
+    LaunchedEffect(prefs.showNonLauncherApps) {
+        allApps = withContext(Dispatchers.IO) {
+            getInstalledApps(context, includeNonLauncher = prefs.showNonLauncherApps)
+        }
+    }
+
     val activeLimits by db.appUsageDao().getAllLimits().collectAsState(initial = emptyList())
-    
+
     var selectedApp by remember { mutableStateOf<AppInfo?>(null) }
     var showBottomSheet by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
@@ -57,30 +67,44 @@ fun BlockingSettingsScreen() {
             modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Active Limits Summary
+            // Aktif limitler
             val active = activeLimits.filter { it.isTimeLimitEnabled || it.isScheduleEnabled }
             if (active.isNotEmpty()) {
                 item {
-                    Text("Aktif Limitler", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp))
+                    Text("Aktif Limitler", color = TextSecondary, fontSize = 13.sp,
+                        modifier = Modifier.padding(vertical = 8.dp))
                 }
                 items(active) { limit ->
                     ActiveLimitRow(limit) {
-                        selectedApp = allApps.find { it.packageName == limit.packageName } ?: AppInfo(limit.appName, limit.packageName)
+                        selectedApp = allApps.find { it.packageName == limit.packageName }
+                            ?: AppInfo(limit.appName, limit.packageName)
                         showBottomSheet = true
                     }
                 }
             }
 
             item {
-                Text("Tüm Uygulamalar", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
+                Text("Tüm Uygulamalar", color = TextSecondary, fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
             }
 
-            items(allApps) { app ->
-                AppRow(app) {
-                    selectedApp = app
-                    showBottomSheet = true
+            if (allApps.isEmpty()) {
+                item {
+                    Box(modifier = Modifier.fillMaxWidth().padding(32.dp),
+                        contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = PurplePrimary, modifier = Modifier.size(28.dp))
+                    }
+                }
+            } else {
+                items(allApps) { app ->
+                    AppRow(app) {
+                        selectedApp = app
+                        showBottomSheet = true
+                    }
                 }
             }
+
+            item { Spacer(modifier = Modifier.height(16.dp)) }
         }
 
         if (showBottomSheet && selectedApp != null) {
@@ -163,10 +187,14 @@ fun LimitSettingsContent(
 ) {
     var isTimeEnabled by remember { mutableStateOf(existingLimit?.isTimeLimitEnabled ?: false) }
     var dailyMinutes by remember { mutableIntStateOf(existingLimit?.dailyLimitMinutes ?: 30) }
-    
+
     var isScheduleEnabled by remember { mutableStateOf(existingLimit?.isScheduleEnabled ?: false) }
-    var blockedDays by remember { mutableStateOf(existingLimit?.blockedDays?.split(",")?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()) }
-    
+    var blockedDays by remember {
+        mutableStateOf(
+            existingLimit?.blockedDays?.split(",")?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()
+        )
+    }
+
     var startHour by remember { mutableIntStateOf(existingLimit?.blockStartHour ?: 22) }
     var startMin by remember { mutableIntStateOf(existingLimit?.blockStartMinute ?: 0) }
     var endHour by remember { mutableIntStateOf(existingLimit?.blockEndHour ?: 8) }
@@ -183,7 +211,6 @@ fun LimitSettingsContent(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Section 1: Daily Time Limit
         SectionTitle("Günlük Süre Limiti", isTimeEnabled) { isTimeEnabled = it }
         if (isTimeEnabled) {
             Row(
@@ -204,7 +231,7 @@ fun LimitSettingsContent(
                     FilterChip(
                         selected = dailyMinutes == mins,
                         onClick = { dailyMinutes = mins },
-                        label = { Text("${if (mins >= 60) mins/60 else mins}${if (mins >= 60) "sa" else "dk"}") },
+                        label = { Text("${if (mins >= 60) mins / 60 else mins}${if (mins >= 60) "sa" else "dk"}") },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = PurplePrimary,
                             selectedLabelColor = Color.White
@@ -216,12 +243,14 @@ fun LimitSettingsContent(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Section 2: Schedule
         SectionTitle("Zaman Planı", isScheduleEnabled) { isScheduleEnabled = it }
         if (isScheduleEnabled) {
             Spacer(modifier = Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                val daysMap = mapOf("MON" to "Pzt", "TUE" to "Sal", "WED" to "Çar", "THU" to "Per", "FRI" to "Cum", "SAT" to "Cmt", "SUN" to "Paz")
+                val daysMap = mapOf(
+                    "MON" to "Pzt", "TUE" to "Sal", "WED" to "Çar",
+                    "THU" to "Per", "FRI" to "Cum", "SAT" to "Cmt", "SUN" to "Paz"
+                )
                 listOf("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN").forEach { day ->
                     Box(
                         modifier = Modifier
@@ -237,16 +266,14 @@ fun LimitSettingsContent(
                     }
                 }
             }
-            
+
             Spacer(modifier = Modifier.height(20.dp))
-            
+
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                TimePickerButton(modifier = Modifier.weight(1f), label = "Başlangıç", hour = startHour, minute = startMin) { h, m ->
-                    startHour = h; startMin = m
-                }
-                TimePickerButton(modifier = Modifier.weight(1f), label = "Bitiş", hour = endHour, minute = endMin) { h, m ->
-                    endHour = h; endMin = m
-                }
+                TimePickerButton(modifier = Modifier.weight(1f), label = "Başlangıç",
+                    hour = startHour, minute = startMin) { h, m -> startHour = h; startMin = m }
+                TimePickerButton(modifier = Modifier.weight(1f), label = "Bitiş",
+                    hour = endHour, minute = endMin) { h, m -> endHour = h; endMin = m }
             }
         }
 
@@ -254,19 +281,20 @@ fun LimitSettingsContent(
 
         Button(
             onClick = {
-                val limit = AppLimit(
-                    packageName = app.packageName,
-                    appName = app.name,
-                    dailyLimitMinutes = dailyMinutes,
-                    isTimeLimitEnabled = isTimeEnabled,
-                    isScheduleEnabled = isScheduleEnabled,
-                    blockedDays = blockedDays.joinToString(","),
-                    blockStartHour = startHour,
-                    blockStartMinute = startMin,
-                    blockEndHour = endHour,
-                    blockEndMinute = endMin
+                onSave(
+                    AppLimit(
+                        packageName = app.packageName,
+                        appName = app.name,
+                        dailyLimitMinutes = dailyMinutes,
+                        isTimeLimitEnabled = isTimeEnabled,
+                        isScheduleEnabled = isScheduleEnabled,
+                        blockedDays = blockedDays.joinToString(","),
+                        blockStartHour = startHour,
+                        blockStartMinute = startMin,
+                        blockEndHour = endHour,
+                        blockEndMinute = endMin
+                    )
                 )
-                onSave(limit)
             },
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = PurplePrimary),
@@ -279,9 +307,17 @@ fun LimitSettingsContent(
 
 @Composable
 fun SectionTitle(title: String, isEnabled: Boolean, onToggle: (Boolean) -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Text(title, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        Switch(checked = isEnabled, onCheckedChange = onToggle, colors = SwitchDefaults.colors(checkedThumbColor = PurpleLight))
+        Switch(
+            checked = isEnabled,
+            onCheckedChange = onToggle,
+            colors = SwitchDefaults.colors(checkedThumbColor = PurpleLight)
+        )
     }
 }
 
@@ -307,45 +343,48 @@ fun TimePickerButton(modifier: Modifier, label: String, hour: Int, minute: Int, 
     }
 }
 
+// ── Veri modeli ──────────────────────────────────────────────
+
 data class AppInfo(val name: String, val packageName: String)
 
-fun getInstalledApps(context: Context): List<AppInfo> {
+
+fun getInstalledApps(
+    context: Context,
+    includeNonLauncher: Boolean = false
+): List<AppInfo> {
     val pm = context.packageManager
     val ownPackage = context.packageName
+    val result = mutableMapOf<String, AppInfo>()
 
-    // Yöntem 1: Launcher'da görünen tüm uygulamaları al (en güvenilir)
-    val launchableApps = mutableMapOf<String, AppInfo>()
-
+    // Yöntem 1: Launcher'da görünen uygulamalar — en güvenilir kaynak
     val launchIntent = android.content.Intent(android.content.Intent.ACTION_MAIN, null).apply {
         addCategory(android.content.Intent.CATEGORY_LAUNCHER)
     }
-    val resolveInfos = pm.queryIntentActivities(launchIntent, 0)
-
-    for (ri in resolveInfos) {
+    pm.queryIntentActivities(launchIntent, 0).forEach { ri ->
         val pkg = ri.activityInfo.packageName
-        if (pkg == ownPackage) continue
-        val label = ri.loadLabel(pm).toString()
-        launchableApps[pkg] = AppInfo(label, pkg)
+        if (pkg == ownPackage) return@forEach
+        result[pkg] = AppInfo(ri.loadLabel(pm).toString(), pkg)
     }
 
-    // Yöntem 2: Kullanıcı tarafından yüklenen ama launcher'da olmayan uygulamaları da ekle
-    try {
-        val allApps = pm.getInstalledApplications(0)
-        for (appInfo in allApps) {
-            val pkg = appInfo.packageName
-            if (pkg == ownPackage) continue
-            if (launchableApps.containsKey(pkg)) continue
+    // Yöntem 2: Sadece ayar açıksa ve tamamen kullanıcı yüklü uygulamalar
+    if (includeNonLauncher) {
+        try {
+            pm.getInstalledApplications(0).forEach { appInfo ->
+                val pkg = appInfo.packageName
+                if (pkg == ownPackage || result.containsKey(pkg)) return@forEach
 
-            // Sistem uygulaması değilse veya güncellenmiş sistem uygulamasıysa ekle
-            val isUserApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0
-            val isUpdatedSystem = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+                // Hem sistem hem de "güncellenmiş sistem" flagini hariç tut
+                // Sadece sıfırdan kullanıcı tarafından yüklenen uygulamalar
+                val isPureUserApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) == 0 &&
+                        (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
 
-            if (isUserApp || isUpdatedSystem) {
-                val label = com.example.traccerapp.utils.AppInfoUtils.getAppName(context, pkg)
-                launchableApps[pkg] = AppInfo(label, pkg)
+                if (isPureUserApp) {
+                    val label = com.example.traccerapp.utils.AppInfoUtils.getAppName(context, pkg)
+                    result[pkg] = AppInfo(label, pkg)
+                }
             }
-        }
-    } catch (_: Exception) { }
+        } catch (_: Exception) { }
+    }
 
-    return launchableApps.values.sortedBy { it.name.lowercase() }
+    return result.values.sortedBy { it.name.lowercase() }
 }
