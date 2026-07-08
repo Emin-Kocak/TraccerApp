@@ -7,7 +7,7 @@ import android.view.accessibility.AccessibilityNodeInfo
  * birini İÇEREN bir node var mı arar (tam eşleşme değil, contains — Instagram/YouTube
  * view-id'leri paket önekiyle gelir, örn. "com.instagram.android:id/clips_viewer_container").
  * Ziyaret edilen çocuk node'lar recycle edilir (root hariç — çağıran taraf sorumlu),
- * WindowLeaked/leak önlenir (mevcut AppAccessibilityService.dumpNode ile aynı disiplin).
+ * her node tam olarak bir kez recycle edilir — WindowLeaked/leak önlenir.
  */
 internal fun containsViewId(root: AccessibilityNodeInfo, idParts: List<String>): Boolean {
     val stack = ArrayDeque<AccessibilityNodeInfo>()
