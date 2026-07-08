@@ -93,13 +93,5 @@ object AppIconUtils {
             null
         }
     }
-
-    /**
-     * Cache'i temizler — uygulama listesi değiştiğinde çağrılabilir
-     */
-    fun invalidateCache() {
-        launcherAppsCache = null
-        cacheTimestamp = 0
-    }
 }
 

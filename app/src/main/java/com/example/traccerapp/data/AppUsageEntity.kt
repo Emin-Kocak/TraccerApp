@@ -16,6 +16,20 @@ data class UsageLog(
     val durationMs: Long
 )
 
+@Entity(tableName = "unlock_events")
+data class UnlockEvent(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val timestampMs: Long
+)
+
+/** Telefonu ele alıp bırakma arası — ACTION_USER_PRESENT'ten bir sonraki ACTION_SCREEN_OFF'a kadar. */
+@Entity(tableName = "phone_sessions")
+data class PhoneSession(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val startMs: Long,
+    val endMs: Long
+)
+
 @Entity(tableName = "app_limits")
 data class AppLimit(
     @PrimaryKey val packageName: String,

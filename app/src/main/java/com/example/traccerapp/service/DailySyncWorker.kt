@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.example.traccerapp.data.AppDatabase
+import com.example.traccerapp.data.PhoneActivitySync
 import com.example.traccerapp.data.UsageLog
 import com.example.traccerapp.utils.AppIconUtils
 import com.example.traccerapp.utils.AppInfoUtils
@@ -38,6 +39,9 @@ class DailySyncWorker(
         const val TAG         = "DailySyncWorker"
         const val WORK_NAME   = "traccer_daily_sync"
         const val STARTUP_WORK_NAME = "traccer_startup_sync"
+
+        /** OS event penceresi ~7 gün — PhoneActivitySync ile aynı kapsam. */
+        private const val RECONCILE_DAYS = 7
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -48,33 +52,43 @@ class DailySyncWorker(
 
             val todayStart = getTodayStartMs()
             val now        = System.currentTimeMillis()
+            val dayMs      = 24 * 60 * 60 * 1000L
 
-            // ── 1. UsageStatsManager'dan bugünün event verilerini çek ─────────
-            val aggregatedMs = buildAggregationMap(usageStatsManager, todayStart, now)
-            Log.d(TAG, "UsageStats: ${aggregatedMs.size} uygulama bulundu")
+            // ── 1-3. Son 7 günü gün gün reconcile et (madde 25) ────────────────
+            // Eskiden yalnızca BUGÜN reconcile ediliyordu: servis dün kapalıysa dünün
+            // verisi sonsuza dek eksik kalıyordu. OS ~7 gün event tuttuğu için
+            // (PhoneActivitySync ile aynı pencere) geçmiş günler de doldurulabiliyor.
+            for (dayOffset in RECONCILE_DAYS - 1 downTo 0) {
+                val dayStart = todayStart - dayOffset * dayMs
+                val dayEnd   = minOf(dayStart + dayMs, now)
 
-            // ── 2. Mevcut DB kayıtlarını al ───────────────────────────────────
-            val existingLogs = db.appUsageDao().getUsageLogsForDate(todayStart).first()
-                .associateBy { it.packageName }
+                val aggregatedMs = buildAggregationMap(usageStatsManager, dayStart, dayEnd)
+                if (aggregatedMs.isEmpty()) continue // OS penceresi dışı ya da veri yok
 
-            // ── 3. Reconciliation: DB'deki > UsageStats ise DB'yi koru (daha doğru)
-            //                       DB'deki < UsageStats ise UsageStats değerini yaz
-            val reconciledLogs = aggregatedMs.map { (pkg, sysMs) ->
-                val dbMs      = existingLogs[pkg]?.durationMs ?: 0L
-                val finalMs   = maxOf(dbMs, sysMs)  // Hangisi büyükse onu kullan
-                val appName   = AppInfoUtils.getAppName(appContext, pkg)
-                UsageLog(
-                    packageName = pkg,
-                    appName     = appName,
-                    date        = todayStart,
-                    durationMs  = finalMs
-                )
+                val existingLogs = db.appUsageDao().getUsageLogsForDate(dayStart).first()
+                    .associateBy { it.packageName }
+
+                // Reconciliation: DB'deki > UsageStats ise DB'yi koru (daha doğru),
+                //                 DB'deki < UsageStats ise UsageStats değerini yaz
+                val reconciledLogs = aggregatedMs.map { (pkg, sysMs) ->
+                    val dbMs    = existingLogs[pkg]?.durationMs ?: 0L
+                    val finalMs = maxOf(dbMs, sysMs)
+                    UsageLog(
+                        packageName = pkg,
+                        appName     = AppInfoUtils.getAppName(appContext, pkg),
+                        date        = dayStart,
+                        durationMs  = finalMs
+                    )
+                }
+
+                if (reconciledLogs.isNotEmpty()) {
+                    db.appUsageDao().upsertDurations(reconciledLogs)
+                    Log.d(TAG, "✅ Gün -$dayOffset: ${reconciledLogs.size} kayıt reconcile edildi")
+                }
             }
 
-            if (reconciledLogs.isNotEmpty()) {
-                db.appUsageDao().upsertDurations(reconciledLogs)
-                Log.d(TAG, "✅ ${reconciledLogs.size} kayıt reconcile edildi")
-            }
+            // ── 4. Unlock/oturum verisini OS'ten senkronize et (tek yazar, madde 24) ──
+            PhoneActivitySync.sync(appContext, db.appUsageDao())
 
             Result.success()
         } catch (e: Exception) {
@@ -115,10 +129,10 @@ class DailySyncWorker(
                 }
             }
 
-            // Hâlâ açık olan uygulamaları şu ana kadar say
-            val now = System.currentTimeMillis()
+            // Hâlâ açık görünen uygulamaları pencere sonuna kadar say
+            // (bugün için "şimdi", geçmiş günler için o günün sonu — madde 25)
             openMap.forEach { (pkg, openMs) ->
-                val elapsed = now - openMs
+                val elapsed = endMs - openMs
                 if (elapsed >= 1_000L) {
                     aggregation[pkg] = (aggregation[pkg] ?: 0L) + elapsed
                 }

@@ -55,13 +55,7 @@ fun BlockingSettingsScreen() {
     val sheetState = rememberModalBottomSheetState()
 
     Scaffold(
-        containerColor = DarkBg,
-        topBar = {
-            TopAppBar(
-                title = { Text("Limitler", style = MaterialTheme.typography.titleLarge) },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBg)
-            )
-        }
+        containerColor = DarkBg
     ) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp),

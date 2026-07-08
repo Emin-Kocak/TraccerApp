@@ -12,10 +12,21 @@ import android.view.accessibility.AccessibilityManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.lifecycleScope
+import com.example.traccerapp.data.AppDatabase
+import com.example.traccerapp.data.PhoneActivitySync
+import com.example.traccerapp.data.UserPreferences
 import com.example.traccerapp.service.AppAccessibilityService
 import com.example.traccerapp.service.TrackingService
-import com.example.traccerapp.ui.screens.ProMainScreen
+import com.example.traccerapp.ui.screens.MainScreen
 import com.example.traccerapp.ui.theme.TraccerAppTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -24,17 +35,34 @@ class MainActivity : ComponentActivity() {
 
         if (hasUsageStatsPermission()) {
             startTrackingService()
+            // Unlock/oturum verisini OS'ten anında backfill et (startup worker'ın 30 sn
+            // gecikmesini bekleme — Room Flow'ları yazınca ekranlar kendiliğinden tazelenir).
+            lifecycleScope.launch(Dispatchers.IO) {
+                PhoneActivitySync.sync(
+                    this@MainActivity,
+                    AppDatabase.getDatabase(this@MainActivity).appUsageDao()
+                )
+            }
         }
 
         requestBatteryOptimizationExemption()
 
         setContent {
-            TraccerAppTheme {
-                ProMainScreen(
+            val context = LocalContext.current
+            val prefs = remember { UserPreferences(context) }
+            var isDarkTheme by remember { mutableStateOf(prefs.isDarkThemeEnabled) }
+
+            TraccerAppTheme(isDarkTheme = isDarkTheme) {
+                MainScreen(
                     checkPermissions = { hasUsageStatsPermission() },
                     requestPermission = { requestUsageStatsPermission() },
                     isAccessibilityEnabled = { isAccessibilityServiceEnabled() },
-                    requestAccessibility = { requestAccessibilityPermission() }
+                    requestAccessibility = { requestAccessibilityPermission() },
+                    isDarkTheme = isDarkTheme,
+                    onToggleTheme = {
+                        isDarkTheme = !isDarkTheme
+                        prefs.isDarkThemeEnabled = isDarkTheme
+                    }
                 )
             }
         }

@@ -41,4 +41,9 @@ class UserPreferences(context: Context) {
     var goalNotificationsEnabled: Boolean
         get() = prefs.getBoolean("goal_notifications", true)
         set(value) { prefs.edit().putBoolean("goal_notifications", value).apply() }
+
+    // Koyu/açık tema tercihi
+    var isDarkThemeEnabled: Boolean
+        get() = prefs.getBoolean("is_dark_theme", true)
+        set(value) { prefs.edit().putBoolean("is_dark_theme", value).apply() }
 }

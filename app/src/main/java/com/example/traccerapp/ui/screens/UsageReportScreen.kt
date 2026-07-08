@@ -94,7 +94,7 @@ fun formatTime(timeMs: Long): String {
 
 data class RawEvent(val pkg: String, val appName: String, val startMs: Long, val endMs: Long)
 
-suspend fun fetchTodayHourBlocks(context: Context): List<HourBlock> =
+suspend fun fetchTodayHourBlocks(context: Context, idleColor: Color): List<HourBlock> =
     withContext(Dispatchers.IO) {
         val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
 
@@ -149,7 +149,7 @@ suspend fun fetchTodayHourBlocks(context: Context): List<HourBlock> =
                         appName = "Boşta",
                         packageName = "",
                         durationSeconds = gapSeconds,
-                        color = DarkBorder,
+                        color = idleColor,
                         initial = "I",
                         isIdle = true
                     ))
@@ -214,10 +214,11 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit, onBack: (() -> Unit)? = nu
     var hourBlocks by remember { mutableStateOf<List<HourBlock>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var refreshTrigger by remember { mutableIntStateOf(0) }
+    val idleColor = DarkBorder
 
     LaunchedEffect(refreshTrigger) {
         isLoading = true
-        hourBlocks = fetchTodayHourBlocks(context)
+        hourBlocks = fetchTodayHourBlocks(context, idleColor)
         isLoading = false
     }
 
@@ -288,7 +289,7 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit, onBack: (() -> Unit)? = nu
 
                 // Ana özet kartı
                 item {
-                    ProSummaryHeroCard(
+                    SummaryHeroCard(
                         totalSeconds = totalSeconds,
                         goalSeconds = prefs.dailyGoalSeconds,
                         onDetailClick = onNavigateToDetail
@@ -301,12 +302,12 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit, onBack: (() -> Unit)? = nu
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        ProTopAppCard(
+                        TopAppCard(
                             modifier = Modifier.weight(1f),
                             label = "EN ÇOK KULLANILAN",
                             entry = topApps.getOrNull(0)
                         )
-                        ProTopAppCard(
+                        TopAppCard(
                             modifier = Modifier.weight(1f),
                             label = "2. EN ÇOK",
                             entry = topApps.getOrNull(1)
@@ -329,7 +330,7 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit, onBack: (() -> Unit)? = nu
                                 Spacer(modifier = Modifier.height(16.dp))
                                 val maxSec = topApps.maxOfOrNull { it.third } ?: 1
                                 topApps.take(6).forEachIndexed { index, entry ->
-                                    ProRankRow(
+                                    RankRow(
                                         rank = index + 1,
                                         appName = entry.first,
                                         packageName = entry.second,
@@ -356,7 +357,7 @@ fun UsageReportScreen(onNavigateToDetail: () -> Unit, onBack: (() -> Unit)? = nu
 }
 
 @Composable
-fun ProSummaryHeroCard(totalSeconds: Int, goalSeconds: Int, onDetailClick: () -> Unit) {
+fun SummaryHeroCard(totalSeconds: Int, goalSeconds: Int, onDetailClick: () -> Unit) {
     val maxSeconds = goalSeconds
     val progress = (totalSeconds.toFloat() / maxSeconds).coerceIn(0f, 1f)
     val remainingSeconds = (maxSeconds - totalSeconds).coerceAtLeast(0)
@@ -454,7 +455,7 @@ fun ProSummaryHeroCard(totalSeconds: Int, goalSeconds: Int, onDetailClick: () ->
 }
 
 @Composable
-fun ProTopAppCard(modifier: Modifier, label: String, entry: Triple<String, String, Int>?) {
+fun TopAppCard(modifier: Modifier, label: String, entry: Triple<String, String, Int>?) {
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
@@ -487,7 +488,7 @@ fun ProTopAppCard(modifier: Modifier, label: String, entry: Triple<String, Strin
 }
 
 @Composable
-fun ProRankRow(rank: Int, appName: String, packageName: String, durationSeconds: Int, progress: Float, color: Color) {
+fun RankRow(rank: Int, appName: String, packageName: String, durationSeconds: Int, progress: Float, color: Color) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             text = "$rank",
@@ -525,6 +526,72 @@ fun ProRankRow(rank: Int, appName: String, packageName: String, durationSeconds:
     }
 }
 
+// ── Takip Sekmesi (Saatlik Detay) ────────────────────────────
+
+@Composable
+fun HourlyTrackingTab() {
+    val context = LocalContext.current
+    var hourBlocks by remember { mutableStateOf<List<HourBlock>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var refreshTrigger by remember { mutableIntStateOf(0) }
+    val idleColor = DarkBorder
+
+    LaunchedEffect(refreshTrigger) {
+        isLoading = true
+        hourBlocks = fetchTodayHourBlocks(context, idleColor)
+        isLoading = false
+    }
+
+    val timelineItems = remember(hourBlocks) { buildTimelineItems(hourBlocks) }
+
+    Box(modifier = Modifier.fillMaxSize().background(DarkBg)) {
+        if (isLoading) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = PurplePrimary, strokeWidth = 2.dp)
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Saatlik Detay",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { refreshTrigger++ }) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(DarkElevated),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = "Yenile", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+                items(timelineItems) { item ->
+                    when (item) {
+                        is TimelineItem.EmptyRange -> EmptyRangeRow(item)
+                        is TimelineItem.ActiveHour -> ActiveHourRow(item.block)
+                    }
+                }
+                item { Spacer(modifier = Modifier.height(8.dp)) }
+            }
+        }
+    }
+}
+
 // ── Detay Ekranı ─────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -534,10 +601,11 @@ fun UsageDetailScreen(onBack: () -> Unit) {
     var hourBlocks by remember { mutableStateOf<List<HourBlock>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var refreshTrigger by remember { mutableIntStateOf(0) }
+    val idleColor = DarkBorder
 
     LaunchedEffect(refreshTrigger) {
         isLoading = true
-        hourBlocks = fetchTodayHourBlocks(context)
+        hourBlocks = fetchTodayHourBlocks(context, idleColor)
         isLoading = false
     }
 
@@ -593,8 +661,8 @@ fun UsageDetailScreen(onBack: () -> Unit) {
                 item { Spacer(modifier = Modifier.height(4.dp)) }
                 items(timelineItems) { item ->
                     when (item) {
-                        is TimelineItem.EmptyRange -> ProEmptyRangeRow(item)
-                        is TimelineItem.ActiveHour -> ProActiveHourRow(item.block)
+                        is TimelineItem.EmptyRange -> EmptyRangeRow(item)
+                        is TimelineItem.ActiveHour -> ActiveHourRow(item.block)
                     }
                 }
                 item { Spacer(modifier = Modifier.height(8.dp)) }
@@ -604,7 +672,7 @@ fun UsageDetailScreen(onBack: () -> Unit) {
 }
 
 @Composable
-fun ProEmptyRangeRow(item: TimelineItem.EmptyRange) {
+fun EmptyRangeRow(item: TimelineItem.EmptyRange) {
     val label = if (item.startHour == item.endHour)
         formatHour(item.startHour)
     else
@@ -633,7 +701,7 @@ fun ProEmptyRangeRow(item: TimelineItem.EmptyRange) {
 }
 
 @Composable
-fun ProActiveHourRow(block: HourBlock) {
+fun ActiveHourRow(block: HourBlock) {
     var expanded by remember { mutableStateOf(false) }
     val arrowRotation by animateFloatAsState(targetValue = if (expanded) 180f else 0f, label = "arrow")
 

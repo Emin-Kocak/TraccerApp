@@ -32,6 +32,41 @@ interface AppUsageDao {
     @Delete
     suspend fun deleteLimit(limit: AppLimit)
 
+    @Query("SELECT * FROM unlock_events WHERE timestampMs BETWEEN :startMs AND :endMs")
+    fun getUnlockEventsBetween(startMs: Long, endMs: Long): Flow<List<UnlockEvent>>
+
+    @Query("SELECT * FROM phone_sessions WHERE startMs BETWEEN :startMs AND :endMs ORDER BY startMs")
+    fun getPhoneSessionsBetween(startMs: Long, endMs: Long): Flow<List<PhoneSession>>
+
+    @Insert
+    suspend fun insertUnlockEvents(events: List<UnlockEvent>)
+
+    @Insert
+    suspend fun insertPhoneSessions(sessions: List<PhoneSession>)
+
+    @Query("DELETE FROM unlock_events WHERE timestampMs BETWEEN :startMs AND :endMs")
+    suspend fun deleteUnlockEventsBetween(startMs: Long, endMs: Long)
+
+    @Query("DELETE FROM phone_sessions WHERE startMs BETWEEN :startMs AND :endMs")
+    suspend fun deletePhoneSessionsBetween(startMs: Long, endMs: Long)
+
+    /**
+     * OS'ten türetilen unlock/oturum verisiyle kapsama penceresini atomik değiştirir
+     * (PhoneActivitySync'in tek yazma noktası). Pencere dışı eski satırlar donuk arşiv.
+     */
+    @Transaction
+    suspend fun replacePhoneActivityWindow(
+        windowStartMs: Long,
+        windowEndMs: Long,
+        sessions: List<PhoneSession>,
+        unlocks: List<UnlockEvent>
+    ) {
+        deletePhoneSessionsBetween(windowStartMs, windowEndMs)
+        deleteUnlockEventsBetween(windowStartMs, windowEndMs)
+        insertPhoneSessions(sessions)
+        insertUnlockEvents(unlocks)
+    }
+
     /**
      * In-memory takipten gelen süreci DB'ye verimli şekilde yaz.
      * REPLACE stratejisi (packageName, date) unique index'i üzerinden çalışır.

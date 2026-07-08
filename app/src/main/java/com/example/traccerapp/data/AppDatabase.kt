@@ -2,10 +2,31 @@ package com.example.traccerapp.data
 
 import android.content.Context
 import androidx.room.Database
+import com.example.traccerapp.BuildConfig
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [UsageLog::class, AppLimit::class], version = 1, exportSchema = false)
+/** v1 → v2: telefonun kilit açma (unlock) olaylarını saymak için yeni tablo. Mevcut veriyi korur. */
+private val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `unlock_events` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `timestampMs` INTEGER NOT NULL)"
+        )
+    }
+}
+
+/** v2 → v3: telefonu ele alıp bırakma arasındaki kullanım oturumlarını (pickup→hangup) saklamak için yeni tablo. */
+private val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `phone_sessions` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `startMs` INTEGER NOT NULL, `endMs` INTEGER NOT NULL)"
+        )
+    }
+}
+
+@Database(entities = [UsageLog::class, AppLimit::class, UnlockEvent::class, PhoneSession::class], version = 3, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun appUsageDao(): AppUsageDao
 
@@ -15,13 +36,18 @@ abstract class AppDatabase : RoomDatabase() {
 
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
+                val builder = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "traccer_database_v2"  // Yeni isim = temiz başlangıç
                 )
-                .fallbackToDestructiveMigration()
-                .build()
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                // Destructive fallback SADECE debug'da: release'te migration unutulursa
+                // kullanıcı verisini sessizce silmek yerine yüksek sesle çöksün (madde 25).
+                if (BuildConfig.DEBUG) {
+                    builder.fallbackToDestructiveMigration()
+                }
+                val instance = builder.build()
                 INSTANCE = instance
                 instance
             }

@@ -1,12 +1,14 @@
 package com.example.traccerapp.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -28,8 +30,13 @@ import com.example.traccerapp.data.UserPreferences
 import com.example.traccerapp.ui.components.RealAppIcon
 import com.example.traccerapp.ui.theme.*
 import com.example.traccerapp.ui.viewmodel.UsageViewModel
+import com.example.traccerapp.utils.AppCategory
+import com.example.traccerapp.utils.AppCategoryUtils
 import com.example.traccerapp.utils.AppInfoUtils
+import com.example.traccerapp.utils.filterVisible
 import java.util.*
+
+private const val DASHBOARD_DAY_MS = 24 * 60 * 60 * 1000L
 
 // ─── Navigasyon durumu ───────────────────────────────────────
 
@@ -42,12 +49,15 @@ private sealed class Screen {
 
 // ─── Ana ekran ───────────────────────────────────────────────
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ProMainScreen(
+fun MainScreen(
     checkPermissions: () -> Boolean,
     requestPermission: () -> Unit,
     isAccessibilityEnabled: () -> Boolean = { true },
-    requestAccessibility: () -> Unit = {}
+    requestAccessibility: () -> Unit = {},
+    isDarkTheme: Boolean = true,
+    onToggleTheme: () -> Unit = {}
 ) {
     var hasPermission by remember { mutableStateOf(checkPermissions()) }
     var hasAccessibility by remember { mutableStateOf(isAccessibilityEnabled()) }
@@ -85,13 +95,20 @@ fun ProMainScreen(
     }
 
     if (!hasPermission) {
-        ProPermissionScreen { requestPermission(); hasPermission = checkPermissions() }
+        PermissionScreen { requestPermission(); hasPermission = checkPermissions() }
         return
     }
 
     Scaffold(
         containerColor = DarkBg,
-        bottomBar = { ProBottomBar(selectedTab) { selectedTab = it } }
+        topBar = {
+            TraccerTopBar(
+                isDarkTheme = isDarkTheme,
+                onToggleTheme = onToggleTheme,
+                onSettingsClick = { currentScreen = Screen.Settings }
+            )
+        },
+        bottomBar = { BottomBar(selectedTab) { selectedTab = it } }
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
             // ⚠️ Erişilebilirlik servisi aktif değilse uyarı göster
@@ -125,11 +142,12 @@ fun ProMainScreen(
                 when (selectedTab) {
                     0 -> DashboardTab(
                         onDetailClick = { currentScreen = Screen.Report },
-                        onSettingsClick = { currentScreen = Screen.Settings }
+                        onNavigateToTakip = { selectedTab = 2 }
                     )
                     1 -> ReportsScreen()
-                    2 -> UsageScreen()
+                    2 -> HourlyTrackingTab()
                     3 -> BlockingSettingsScreen()
+                    4 -> UsageAnalysisTab()
                 }
             }
         }
@@ -137,10 +155,44 @@ fun ProMainScreen(
 }
 
 
+// ─── Ortak üst bar ───────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TraccerTopBar(isDarkTheme: Boolean, onToggleTheme: () -> Unit, onSettingsClick: () -> Unit) {
+    TopAppBar(
+        title = {
+            Text(
+                "Traccer",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+        },
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBg),
+        actions = {
+            IconButton(onClick = onToggleTheme) {
+                Icon(
+                    imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
+                    contentDescription = if (isDarkTheme) "Açık moda geç" else "Koyu moda geç",
+                    tint = TextSecondary
+                )
+            }
+            IconButton(onClick = onSettingsClick) {
+                Icon(
+                    Icons.Default.Settings,
+                    contentDescription = "Ayarlar",
+                    tint = TextSecondary
+                )
+            }
+        }
+    )
+}
+
 // ─── Bottom bar ──────────────────────────────────────────────
 
 @Composable
-fun ProBottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
+fun BottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
     NavigationBar(
         containerColor = DarkSurface,
         tonalElevation = 0.dp
@@ -149,7 +201,8 @@ fun ProBottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
             Triple(Icons.Default.Dashboard, "Dashboard", 0),
             Triple(Icons.Default.BarChart, "Raporlar", 1),
             Triple(Icons.Default.AccessTime, "Takip", 2),
-            Triple(Icons.Default.Shield, "Limitler", 3)
+            Triple(Icons.Default.Shield, "Limitler", 3),
+            Triple(Icons.AutoMirrored.Filled.TrendingUp, "Analiz", 4)
         ).forEach { (icon, label, index) ->
             NavigationBarItem(
                 selected = selectedTab == index,
@@ -185,7 +238,7 @@ fun ProBottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
 @Composable
 fun DashboardTab(
     onDetailClick: () -> Unit,
-    onSettingsClick: () -> Unit,
+    onNavigateToTakip: () -> Unit,
     viewModel: UsageViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -209,16 +262,12 @@ fun DashboardTab(
     val logsState by logsFlow.collectAsState(initial = null)
     val isLoading = logsState == null
 
-    // Hidden packages'ı filtrele + minimum kullanım filtresi uygula
+    // Hidden packages + minimum kullanım filtresi (ortak yardımcı, madde 25)
     val logs = remember(logsState, prefs.hiddenPackages, prefs.minimumUsageMs) {
-        val hidden = prefs.hiddenPackages
-        val minMs = prefs.minimumUsageMs
         (logsState ?: emptyList())
-            .filter { it.packageName !in hidden }
-            .filter { it.durationMs >= minMs }
+            .filterVisible(prefs)
+            .sortedByDescending { it.durationMs }
     }
-
-    var goalHours by remember { mutableIntStateOf(prefs.dailyGoalHours) }
 
     // Veriyi yenile - DB'ye kaydetmek için
     LaunchedEffect(Unit) {
@@ -228,129 +277,158 @@ fun DashboardTab(
     val totalMs = logs.sumOf { it.durationMs }
     val topApp = logs.firstOrNull()
 
+    // Telefonun bugün kaç kere açıldığı (unlock event sayısı)
+    val unlockEventsFlow = remember(todayStart) {
+        db.appUsageDao().getUnlockEventsBetween(todayStart, todayStart + DASHBOARD_DAY_MS)
+    }
+    val unlockEvents by unlockEventsFlow.collectAsState(initial = null)
+    val unlockCount = unlockEvents?.size ?: 0
+
+    // Bugünkü telefon kullanım oturumları (pickup → hangup)
+    val phoneSessionsFlow = remember(todayStart) {
+        db.appUsageDao().getPhoneSessionsBetween(todayStart, todayStart + DASHBOARD_DAY_MS)
+    }
+    val phoneSessions by phoneSessionsFlow.collectAsState(initial = null)
+    val phoneSessionsTotalMs = remember(phoneSessions) { (phoneSessions ?: emptyList()).sumOf { it.endMs - it.startMs } }
+
+    // Kategoriye göre bugünkü kullanım (çember gösterge için)
+    val categoryCache = remember { mutableMapOf<String, AppCategory>() }
+    val categoryTotals: List<Pair<AppCategory, Long>> = remember(logs) {
+        logs.groupBy { log -> categoryCache.getOrPut(log.packageName) { AppCategoryUtils.categorize(context, log.packageName) } }
+            .map { (category, group) -> category to group.sumOf { it.durationMs } }
+            .sortedByDescending { it.second }
+    }
+
+    // Saatlik kullanım dakikası (UsageStatsManager event'lerinden — DB'de saat kırılımı yok)
+    val idleColor = DarkBorder
+    var hourBlocks by remember { mutableStateOf<List<HourBlock>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        hourBlocks = fetchTodayHourBlocks(context, idleColor)
+    }
+    val hourlyUsageMinutes: List<Int> = remember(hourBlocks) {
+        if (hourBlocks.isEmpty()) List(24) { 0 }
+        else hourBlocks.map { block -> (block.sessions.filter { !it.isIdle }.sumOf { it.durationSeconds }) / 60 }
+    }
+    val hourlyUnlockCounts: List<Int> = remember(unlockEvents) {
+        val counts = IntArray(24)
+        (unlockEvents ?: emptyList()).forEach { event ->
+            val hour = Calendar.getInstance().apply { timeInMillis = event.timestampMs }.get(Calendar.HOUR_OF_DAY)
+            counts[hour] = counts[hour] + 1
+        }
+        counts.toList()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(DarkBg)
             .verticalScroll(rememberScrollState())
-            .padding(20.dp)
+            .padding(16.dp)
     ) {
-        // Header — sağ üstte ayarlar ikonu
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Dashboard", style = MaterialTheme.typography.headlineLarge)
-                Text("Bugünkü özet", color = TextSecondary, fontSize = 13.sp)
-            }
-            // Ayarlar ikonu
-            IconButton(onClick = onSettingsClick) {
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(DarkSurface),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Default.Settings,
-                        contentDescription = "Ayarlar",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-            }
-        }
+        // Ana kart (Zaman Raporu ile aynı hero kart tasarımı)
+        SummaryHeroCard(
+            totalSeconds = (totalMs / 1000L).toInt(),
+            goalSeconds = prefs.dailyGoalSeconds,
+            onDetailClick = onNavigateToTakip
+        )
 
-        Spacer(modifier = Modifier.height(24.dp))
-
-        val goalMs = goalHours * 3600 * 1000L
-        val progress = (totalMs.toFloat() / goalMs).coerceIn(0f, 1f)
-
-        // Ana kart
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(PurpleDim, DarkElevated),
-                        radius = 800f
-                    )
-                )
-                .padding(24.dp)
-        ) {
-            Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(if (isLoading) StatusAmber else StatusGreen)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (isLoading) "YÜKLENİYOR..." else "CANLI TAKİP",
-                        color = if (isLoading) StatusAmber else StatusGreen,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        letterSpacing = 1.5.sp
-                    )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = if (isLoading) "—" else AppInfoUtils.formatDuration(totalMs),
-                    color = TextPrimary,
-                    fontSize = 42.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text("toplam ekran süresi", color = TextSecondary, fontSize = 13.sp)
-                Spacer(modifier = Modifier.height(20.dp))
-
-                Column {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Günlük Hedef", color = TextSecondary, fontSize = 11.sp)
-                        Text("$goalHours saat", color = TextSecondary, fontSize = 11.sp)
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(DarkBorder)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(progress)
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(3.dp))
-                                .background(Brush.horizontalGradient(listOf(PurplePrimary, PurpleLight)))
-                        )
-                    }
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
         // Metric kartlar
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            ProMetricCard(
-                modifier = Modifier.weight(1f),
-                label = "Uygulama Sayısı",
-                value = if (isLoading) "—" else "${logs.size}",
-                icon = Icons.Default.Apps,
-                accent = StatusBlue
-            )
-            ProMetricCard(
+            MetricCard(
                 modifier = Modifier.weight(1f),
                 label = "En Çok Kullanılan",
                 value = topApp?.appName?.take(10) ?: "—",
                 icon = Icons.Default.Star,
                 accent = StatusAmber
             )
+            MetricCard(
+                modifier = Modifier.weight(1f),
+                label = "Telefon Açılma",
+                value = if (isLoading) "—" else "$unlockCount",
+                icon = Icons.Default.LockOpen,
+                accent = StatusBlue
+            )
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Kategoriye göre kullanım çemberi
+        if (categoryTotals.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(DarkSurface)
+                    .padding(16.dp)
+            ) {
+                Column {
+                    Text("Kategoriye Göre Kullanım", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    CategoryDonutChart(categoryTotals = categoryTotals)
+                }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        // Saatlik kullanım grafiği (dakika)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(DarkSurface)
+                .padding(16.dp)
+        ) {
+            Column {
+                Text("Saatlik Kullanım (dakika)", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(12.dp))
+                HourlyBarChart(values = hourlyUsageMinutes, barColor = PurplePrimary, valueLabel = { "$it dk" })
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Saatlik telefon açılma grafiği
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(DarkSurface)
+                .padding(16.dp)
+        ) {
+            Column {
+                Text("Saatlik Telefon Açılma", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(12.dp))
+                HourlyBarChart(values = hourlyUnlockCounts, barColor = StatusBlue, valueLabel = { "$it kez" })
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Telefon kullanım oturumları (elden ele: pickup → hangup)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(DarkSurface)
+                .padding(16.dp)
+        ) {
+            Column {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Kullanım Oturumları", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = if (phoneSessions == null) "—" else "${phoneSessions?.size ?: 0} oturum · ${AppInfoUtils.formatDuration(phoneSessionsTotalMs)}",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                PhoneSessionTimeline(sessions = phoneSessions ?: emptyList(), dayStart = todayStart)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
 
         // Uygulama listesi
         Box(
@@ -358,7 +436,7 @@ fun DashboardTab(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(20.dp))
                 .background(DarkSurface)
-                .padding(20.dp)
+                .padding(14.dp)
         ) {
             Column {
                 Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -377,7 +455,7 @@ fun DashboardTab(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 when {
                     isLoading -> {
@@ -416,9 +494,9 @@ fun DashboardTab(
                         }
                     }
                     else -> {
-                        val maxMs = logs.maxOfOrNull { it.durationMs } ?: 1L
+                        val maxMs = (logs.maxOfOrNull { it.durationMs } ?: 1L).coerceAtLeast(1L)
                         logs.take(6).forEachIndexed { index, log ->
-                            ProAppRow(
+                            AppRow(
                                 name = log.appName,
                                 packageName = log.packageName,
                                 duration = AppInfoUtils.formatDuration(log.durationMs),
@@ -426,7 +504,7 @@ fun DashboardTab(
                                 color = AppColors[index % AppColors.size]
                             )
                             if (index < minOf(5, logs.size - 1)) {
-                                HorizontalDivider(color = DarkBorder, modifier = Modifier.padding(vertical = 8.dp))
+                                HorizontalDivider(color = DarkBorder, modifier = Modifier.padding(vertical = 4.dp))
                             }
                         }
                     }
@@ -439,12 +517,12 @@ fun DashboardTab(
 // ─── Yardımcı composable'lar ─────────────────────────────────
 
 @Composable
-fun ProMetricCard(modifier: Modifier, label: String, value: String, icon: ImageVector, accent: Color) {
+fun MetricCard(modifier: Modifier, label: String, value: String, icon: ImageVector, accent: Color) {
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
             .background(DarkSurface)
-            .padding(16.dp)
+            .padding(12.dp)
     ) {
         Column {
             Box(
@@ -456,7 +534,7 @@ fun ProMetricCard(modifier: Modifier, label: String, value: String, icon: ImageV
             ) {
                 Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(18.dp))
             }
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
             Text(value, color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Text(label, color = TextSecondary, fontSize = 10.sp)
         }
@@ -464,13 +542,13 @@ fun ProMetricCard(modifier: Modifier, label: String, value: String, icon: ImageV
 }
 
 @Composable
-fun ProAppRow(name: String, packageName: String, duration: String, progress: Float, color: Color) {
+fun AppRow(name: String, packageName: String, duration: String, progress: Float, color: Color) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
         RealAppIcon(packageName = packageName, appName = name, size = 36.dp, cornerRadius = 10.dp)
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(8.dp))
         Column(modifier = Modifier.weight(1f)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(name, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
@@ -497,7 +575,7 @@ fun ProAppRow(name: String, packageName: String, duration: String, progress: Flo
 }
 
 @Composable
-fun ProPermissionScreen(onRequest: () -> Unit) {
+fun PermissionScreen(onRequest: () -> Unit) {
     Box(modifier = Modifier.fillMaxSize().background(DarkBg), contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -535,58 +613,4 @@ fun ProPermissionScreen(onRequest: () -> Unit) {
             }
         }
     }
-}
-
-// GoalSettingsDialog — kullanılıyorsa kalsın (artık ayarlar ekranından da erişilebilir)
-@Composable
-fun GoalSettingsDialog(currentGoal: Int, onConfirm: (Int) -> Unit, onDismiss: () -> Unit) {
-    var hours by remember { mutableIntStateOf(currentGoal) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = DarkSurface,
-        title = { Text("Günlük Hedef", color = TextPrimary) },
-        text = {
-            Column {
-                Text("Günlük ekran süresi hedefini belirle:", color = TextSecondary, fontSize = 13.sp)
-                Spacer(modifier = Modifier.height(16.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    IconButton(onClick = { if (hours > 1) hours-- }) {
-                        Icon(Icons.Default.Remove, null, tint = PurpleLight)
-                    }
-                    Text("$hours saat", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                    IconButton(onClick = { if (hours < 16) hours++ }) {
-                        Icon(Icons.Default.Add, null, tint = PurpleLight)
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(2, 4, 6, 8).forEach { h ->
-                        FilterChip(
-                            selected = hours == h,
-                            onClick = { hours = h },
-                            label = { Text("${h}sa") },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = PurplePrimary,
-                                selectedLabelColor = Color.White
-                            )
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(hours) }) {
-                Text("Kaydet", color = PurplePrimary)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("İptal", color = TextSecondary)
-            }
-        }
-    )
 }

@@ -11,6 +11,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -53,7 +54,9 @@ class AppAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG               = "AppAccessibilityService"
         private const val FLUSH_INTERVAL_MS = 10 * 60 * 1000L
-        private const val BLOCK_COOLDOWN_MS = 5_000L
+        private const val BLOCK_COOLDOWN_MS = 800L
+        /** Foreground'daki app'i periyodik limit kontrolü için tik aralığı (madde 25/13). */
+        private const val IN_APP_CHECK_INTERVAL_MS = 30 * 1000L
 
         private val _liveUsageFlow = MutableStateFlow<Map<String, Long>>(emptyMap())
         val liveUsageFlow: StateFlow<Map<String, Long>> = _liveUsageFlow.asStateFlow()
@@ -125,17 +128,17 @@ class AppAccessibilityService : AccessibilityService() {
 
     // ─── Flush Job ────────────────────────────────────────────────────────────
     private var flushJob: Job? = null
+    private var inAppCheckJob: Job? = null
 
     // ─── Screen OFF Receiver ──────────────────────────────────────────────────
+    // NOT: unlock/oturum takibi artık burada DEĞİL — PhoneActivitySync (OS verisi) tek yazar
+    // (bkz. CLAUDE.md madde 24). Bu receiver yalnızca app-kullanım süresini flush eder.
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                Intent.ACTION_SCREEN_OFF -> {
-                    Log.d(TAG, "Screen OFF → flushing to DB")
-                    commitCurrentSession()
-                    flushToDB()
-                }
-                Intent.ACTION_USER_PRESENT -> Log.d(TAG, "Screen ON / Unlocked")
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                Log.d(TAG, "Screen OFF → flushing to DB")
+                commitCurrentSession()
+                flushToDB()
             }
         }
     }
@@ -149,16 +152,25 @@ class AppAccessibilityService : AccessibilityService() {
 
         loadTodayUsageFromDB()
         observeLimitsCache()
-        registerReceiver(screenReceiver, IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_USER_PRESENT)
-        })
+        // API 33+ (targetSdk 36 burada): context-registered receiver'lar için
+        // RECEIVER_EXPORTED/RECEIVER_NOT_EXPORTED zorunlu, yoksa SecurityException atar (madde 17).
+        // ACTION_SCREEN_OFF system_server'dan gelir → NOT_EXPORTED ile sorunsuz teslim edilir
+        // (madde 22'deki "Exported Denial" sorunu systemui'den gelen ACTION_USER_PRESENT içindi;
+        // o action artık dinlenmiyor — unlock/oturum verisi PhoneActivitySync'ten, madde 24).
+        ContextCompat.registerReceiver(
+            this,
+            screenReceiver,
+            IntentFilter(Intent.ACTION_SCREEN_OFF),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         startPeriodicFlush()
+        startInAppLimitCheck()
         Log.d(TAG, "✅ AppAccessibilityService STARTED (Event-Driven + Overlay)")
     }
 
     override fun onDestroy() {
         flushJob?.cancel()
+        inAppCheckJob?.cancel()
         unregisterReceiver(screenReceiver)
         commitCurrentSession()
         removeOverlay()   // WindowLeaked önle
@@ -175,6 +187,9 @@ class AppAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val newPackage = event.packageName?.toString() ?: return
+
+        // Overlay penceresinin kendisi odak alıp bu event'i tetiklemiş olabilir; yoksay
+        if (newPackage == this.packageName) return
 
         // Overlay görünürken başka bir pakete geçilirse overlay'i kaldır
         if (overlayView != null && newPackage != blockedOverlayPackage) {
@@ -215,15 +230,24 @@ class AppAccessibilityService : AccessibilityService() {
     // ═══════════════════════ Blocking Logic ════════════════════════════════════
 
     private fun checkAndBlockIfNeeded(packageName: String, now: Long) {
+        // Bu paket için overlay zaten gösteriliyorsa tekrar tetikleme
+        if (blockedOverlayPackage == packageName) return
+        // Çok kısa aralıklı yinelenen event'lere karşı debounce (gerçek çıkış-giriş bunu aşar)
         if (packageName == lastBlockedPackage && now - lastBlockedTime < BLOCK_COOLDOWN_MS) {
-            Log.d(TAG, "Cooldown aktif: $packageName")
+            Log.d(TAG, "Debounce aktif: $packageName")
             return
         }
         val limit = limitsCache[packageName] ?: return
         if (!limit.isTimeLimitEnabled && !limit.isScheduleEnabled) return
 
         if (limit.isTimeLimitEnabled && limit.dailyLimitMinutes > 0) {
-            val usedMinutes = ((dailyUsageMs[packageName] ?: 0L) / 60_000L).toInt()
+            // Henüz commit edilmemiş (mevcut oturumdaki) süreyi de say — yoksa periyodik
+            // kontrol dailyUsageMs güncellenene kadar (paket değişimi/10dk flush) hep eski
+            // değeri görür ve limiti aşan kesintisiz oturumu asla yakalayamaz (madde 13/25).
+            val liveElapsed = if (packageName == currentPackage && sessionStartMs > 0L) {
+                (now - sessionStartMs).coerceAtLeast(0L)
+            } else 0L
+            val usedMinutes = (((dailyUsageMs[packageName] ?: 0L) + liveElapsed) / 60_000L).toInt()
             Log.d(TAG, "${limit.appName}: $usedMinutes/${limit.dailyLimitMinutes} dk")
             if (usedMinutes >= limit.dailyLimitMinutes) {
                 triggerBlock(packageName, limit.appName, "Günlük limit (${limit.dailyLimitMinutes}dk) doldu")
@@ -273,7 +297,8 @@ class AppAccessibilityService : AccessibilityService() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         )
 
@@ -471,6 +496,28 @@ class AppAccessibilityService : AccessibilityService() {
 
     private fun flushToDB() {
         serviceScope.launch(Dispatchers.IO) { flushToDBSuspend() }
+    }
+
+    // ═══════════════════════ Periodic In-App Limit Check (madde 25) ═══════════
+
+    /**
+     * Eskiden checkAndBlockIfNeeded YALNIZCA paket değişince (foreground app girişinde)
+     * tetikleniyordu (madde 13'te bilinen boşluk). Kullanıcı limit dolduktan sonra aynı
+     * uygulamada kesintisiz kalırsa hiç bloklanmıyordu. Bu job foreground'daki paketi
+     * 30 sn'de bir kontrol eder — yalnızca aktif limiti olan bir paket foreground'dayken
+     * anlamlı iş yapar (limitsCache boşsa/paket limitsizse tek satır kontrol edip döner),
+     * pil maliyeti ihmal edilebilir düzeyde kalır.
+     */
+    private fun startInAppLimitCheck() {
+        inAppCheckJob = serviceScope.launch {
+            while (isActive) {
+                delay(IN_APP_CHECK_INTERVAL_MS)
+                val pkg = currentPackage ?: continue
+                if (blockedOverlayPackage == pkg) continue // zaten bloklu, tekrar tetikleme
+                if (limitsCache[pkg] == null) continue     // limitsiz app, iş yok
+                checkAndBlockIfNeeded(pkg, System.currentTimeMillis())
+            }
+        }
     }
 
     private suspend fun flushToDBSuspend() {
