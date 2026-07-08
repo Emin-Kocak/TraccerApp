@@ -166,6 +166,26 @@ Derleme (`compileDebugKotlin`) tüm değişikliklerden sonra BUILD SUCCESSFUL. C
 
 ## Devam eden / ertelenmiş iş
 
+### ⚠️ YARIM KALAN İŞ: Reels/Shorts engelleme — subagent-driven-development yürütmesi ortasında durduruldu (2026-07-09)
+
+**Plan**: `docs/superpowers/plans/2026-07-09-reels-shorts-blocker.md` (8 görev, tam kod dahil). **Spec**: `docs/superpowers/specs/2026-07-09-reels-shorts-blocker-design.md`. Kullanıcı "Subagent-Driven Development" yöntemini seçti (superpowers:subagent-driven-development skill) — her görev için: implementer subagent → spec-compliance reviewer subagent → code-quality reviewer subagent → görev tamamlandı işaretle → sıradaki göreve geç.
+
+**Durum:**
+- ✅ **Task 1** (tespit arayüzü + node arama + Instagram/YouTube detector) — implement edildi, spec ✅, kalite ✅ (1 minor docstring düzeltmesi ben tarafımdan yapıldı, commit `8006691`). Tamamlandı, commit'lendi.
+- ✅ **Task 2** (ReelDetectorRegistry, TDD) — implement edildi, spec ✅, kalite ✅ (0 bulgu). Tamamlandı, commit `83b8e06`.
+- ✅ **Task 3** (ReelBlockLogic bütçe/susturma mantığı, TDD) — implement edildi, spec ✅, kalite ✅ (2 ek sınır-durum testi ben tarafımdan eklendi, commit `0482d57`). Tamamlandı, commit'lendi.
+- ⚠️ **Task 4** (accessibility_service_config.xml — `typeWindowContentChanged` event tipi eklenmesi) — implementer subagent dispatch edildi, dosyayı **doğru şekilde değiştirdi** (plandaki Step 1 ile birebir eşleşiyor, doğruladım) ama **kullanıcı görev başlamadan/derleme-commit adımına gelmeden durdurdu**. Şu an `app/src/main/res/xml/accessibility_service_config.xml` working tree'de commit edilmemiş halde duruyor, içeriği doğru — SİLİNMEMELİ. Kalan adımlar: derleme kontrolü (`./gradlew.bat :app:compileDebugKotlin --console=plain`) → commit (`git add app/src/main/res/xml/accessibility_service_config.xml && git commit -m "feat: listen for window content changes to detect in-app reel navigation"` — **attribution trailer EKLEME**) → spec-compliance reviewer subagent → code-quality reviewer subagent.
+- ⏳ **Task 5-8** hiç başlanmadı: UserPreferences platform ayarları, AppAccessibilityService kablolama, BlockingSettingsScreen UI, tam doğrulama+CLAUDE.md madde 26. Tam metinleri plan dosyasında.
+
+**Devam ederken dikkat edilecekler:**
+- Model seçimi: mekanik görevler (1,2,3,4,5,8) implementer = haiku; entegrasyon görevleri (6,7 — çok dosyalı/çok noktalı düzenleme) implementer = sonnet; **her iki reviewer (spec-compliance + code-quality) her görevde = opus** (bu düzen Task 1-3'te tutarlı uygulandı).
+- **Commit mesajlarına asla "Co-Authored-By" veya AI-attribution trailer eklenmeyecek** (kullanıcının global ayarı, `~/.claude/settings.json`'da devre dışı) — implementer subagent promptlarına bu talimat açıkça yazılmalı (Task 2'de bir subagent bunu atlamıştı, sonraki görevlerde promptların içine "IMPORTANT — commit message trailer" notu eklendi, bu şablon korunmalı).
+- Reviewer'lar rapor edilen commit SHA'sını/test sonucunu KÖRÜKÖRÜNE güvenmiyor, `git show`/testleri kendisi tekrar çalıştırıyor — bu disiplin korunmalı.
+- Görev 1 ve 3'te reviewer'ların bulduğu minor sorunları (docstring yanlış referans, eksik sınır testi) ben doğrudan düzelttim (ayrı bir implementer subagent turu açmadım) — trivial/tek satırlık düzeltmeler için bu kabul edilebilir, ama görevin asıl implementasyonunu subagent'a bırakma prensibi korunmalı.
+- Reel-blocker'a başlamadan önce, bu konuşmadan önce birikmiş commit edilmemiş iş (madde 12-25 + CLAUDE.md) tek bir commit'te (`eb7ca02` + `9cf6c4f`) toplanıp temiz bir başlangıç noktası oluşturuldu — bu artık geçmişte, tekrar gerekmiyor.
+
+**Devam etmek için**: kullanıcıya "reel-blocker planına Task 4'ten devam et" denildiğinde, önce working tree'deki commit edilmemiş XML değişikliğini derleme+commit ile tamamla, sonra Task 4'ün review adımlarını (spec+kalite) çalıştır, sonra Task 5'e geç — subagent-driven-development skill'inin "Continuous execution" ilkesine göre (kullanıcı tekrar durdurmadıkça) 8. göreve kadar durmadan devam edilmeli.
+
 - **Sonsuz kaydırma (Instagram Reels/Keşfet vb.) süre sınırı özelliği**: detaylı konuşuldu, altyapı Instagram'a özel ama genişletilebilir şekilde planlandı, sonra **kullanıcı tarafından erteledi**. TikTok/YouTube Shorts'a da genişletilmesi isteniyor ileride. Henüz kod yazılmadı.
 
 ## Doğrulama notu
