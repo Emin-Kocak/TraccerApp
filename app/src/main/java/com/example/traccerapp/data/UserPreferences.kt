@@ -46,4 +46,35 @@ class UserPreferences(context: Context) {
     var isDarkThemeEnabled: Boolean
         get() = prefs.getBoolean("is_dark_theme", true)
         set(value) { prefs.edit().putBoolean("is_dark_theme", value).apply() }
+
+    // Reels/Shorts engelleme — bkz. docs/superpowers/specs/2026-07-09-reels-shorts-blocker-design.md
+    var instagramReelBlockEnabled: Boolean
+        get() = prefs.getBoolean("instagram_reel_block_enabled", false)
+        set(value) { prefs.edit().putBoolean("instagram_reel_block_enabled", value).apply() }
+
+    var instagramReelBlockMode: ReelBlockMode
+        get() = ReelBlockMode.valueOf(
+            prefs.getString("instagram_reel_block_mode", ReelBlockMode.INSTANT.name) ?: ReelBlockMode.INSTANT.name
+        )
+        set(value) { prefs.edit().putString("instagram_reel_block_mode", value.name).apply() }
+
+    var instagramReelBudgetMinutes: Int
+        get() = prefs.getInt("instagram_reel_budget_minutes", 15)
+        set(value) { prefs.edit().putInt("instagram_reel_budget_minutes", value).apply() }
+
+    var youtubeShortsBlockEnabled: Boolean
+        get() = prefs.getBoolean("youtube_shorts_block_enabled", false)
+        set(value) { prefs.edit().putBoolean("youtube_shorts_block_enabled", value).apply() }
+
+    var youtubeShortsBlockMode: ReelBlockMode
+        get() = ReelBlockMode.valueOf(
+            prefs.getString("youtube_shorts_block_mode", ReelBlockMode.INSTANT.name) ?: ReelBlockMode.INSTANT.name
+        )
+        set(value) { prefs.edit().putString("youtube_shorts_block_mode", value.name).apply() }
+
+    var youtubeShortsBudgetMinutes: Int
+        get() = prefs.getInt("youtube_shorts_budget_minutes", 15)
+        set(value) { prefs.edit().putInt("youtube_shorts_budget_minutes", value).apply() }
 }
+
+enum class ReelBlockMode { INSTANT, BUDGET }
