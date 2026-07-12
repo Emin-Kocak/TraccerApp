@@ -220,12 +220,16 @@ class AppAccessibilityService : AccessibilityService() {
             removeOverlay()
         }
 
+        // Reel oturumu, ignore edilen pakete (launcher/Home) geçişte de kapanmalı — bu yüzden
+        // shouldIgnorePackage guard'ından ÖNCE commit et. currentPackage değişmediyse hâlâ aynı
+        // reel'deyiz, kapatma (aksi halde her state event'inde oturum yanlışlıkla biterdi).
+        if (newPackage != currentPackage) commitReelSession()
+
         if (shouldIgnorePackage(newPackage)) return
         if (newPackage == currentPackage) return
 
         val now = System.currentTimeMillis()
         commitSessionAt(now)
-        commitReelSession(now)
 
         currentPackage = newPackage
         sessionStartMs = now
@@ -305,11 +309,14 @@ class AppAccessibilityService : AccessibilityService() {
         val pkg = currentPackage ?: return
         if (blockedOverlayPackage != null) return // overlay zaten gösteriliyor
         val detector = ReelDetectorRegistry.detectorFor(pkg) ?: return
-        if (!isReelBlockEnabledFor(pkg)) return
 
+        // Throttle, pahalı işlerden (SharedPreferences okuması + node ağacı taraması) ÖNCE —
+        // hızlı kaydırmada content-changed event'i çok sık ateşlenir, gereksiz işi keser.
         val now = System.currentTimeMillis()
         if (now - lastReelCheckMs < REEL_CHECK_THROTTLE_MS) return
         lastReelCheckMs = now
+
+        if (!isReelBlockEnabledFor(pkg)) return
 
         val root = rootInActiveWindow ?: return
         val isReel = try {
@@ -354,7 +361,7 @@ class AppAccessibilityService : AccessibilityService() {
         when (reelBlockModeFor(pkg)) {
             ReelBlockMode.INSTANT -> triggerReelBlock(pkg)
             ReelBlockMode.BUDGET -> {
-                resetReelUsageIfNewDay(now)
+                resetReelUsageIfNewDay()
                 val liveElapsed = (now - (reelContentStartMs ?: now)).coerceAtLeast(0L)
                 val accumulated = (reelUsageMs[pkg] ?: 0L) + liveElapsed
                 if (hasExceededReelBudget(accumulated, reelBudgetMinutesFor(pkg))) {
@@ -370,11 +377,14 @@ class AppAccessibilityService : AccessibilityService() {
         reelContentStartMs = null
         reelContentPackage = null
         val elapsed = (now - start).coerceAtLeast(0L)
-        resetReelUsageIfNewDay(now)
+        resetReelUsageIfNewDay()
         reelUsageMs.merge(pkg, elapsed, Long::plus)
     }
 
-    private fun resetReelUsageIfNewDay(now: Long) {
+    /** Gün dönümünde bütçe sayacını sıfırlar. Not: gece yarısını aşan tek bir kesintisiz reel
+     *  oturumu, tüm süresiyle bittiği güne yazılır (madde 21'deki oturum-güne-atama ruhuyla aynı,
+     *  best-effort in-memory sayaç — bölme yapılmadı, kabul edilebilir edge-case). */
+    private fun resetReelUsageIfNewDay() {
         val todayStart = getTodayStartMs()
         if (reelUsageDayStart != todayStart) {
             reelUsageMs.clear()
