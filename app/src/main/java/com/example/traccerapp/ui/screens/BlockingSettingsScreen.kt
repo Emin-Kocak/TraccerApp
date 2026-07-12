@@ -26,6 +26,7 @@ import com.example.traccerapp.ui.components.RealAppIcon
 import com.example.traccerapp.data.AppDatabase
 import com.example.traccerapp.data.AppLimit
 import com.example.traccerapp.data.UserPreferences
+import com.example.traccerapp.data.ReelBlockMode
 import com.example.traccerapp.ui.theme.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -75,6 +76,10 @@ fun BlockingSettingsScreen() {
                         showBottomSheet = true
                     }
                 }
+            }
+
+            item {
+                ReelBlockSettingsSection(prefs)
             }
 
             item {
@@ -295,6 +300,113 @@ fun LimitSettingsContent(
             shape = RoundedCornerShape(12.dp)
         ) {
             Text("Kaydet", color = Color.White, modifier = Modifier.padding(vertical = 4.dp))
+        }
+    }
+}
+
+@Composable
+fun ReelBlockSettingsSection(prefs: UserPreferences) {
+    var igEnabled by remember { mutableStateOf(prefs.instagramReelBlockEnabled) }
+    var igMode by remember { mutableStateOf(prefs.instagramReelBlockMode) }
+    var igBudget by remember { mutableIntStateOf(prefs.instagramReelBudgetMinutes) }
+
+    var ytEnabled by remember { mutableStateOf(prefs.youtubeShortsBlockEnabled) }
+    var ytMode by remember { mutableStateOf(prefs.youtubeShortsBlockMode) }
+    var ytBudget by remember { mutableIntStateOf(prefs.youtubeShortsBudgetMinutes) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            "Sonsuz Kaydırma Engelleme", color = TextSecondary, fontSize = 13.sp,
+            modifier = Modifier.padding(top = 16.dp, bottom = 4.dp)
+        )
+
+        ReelBlockPlatformCard(
+            title = "Instagram Reels",
+            enabled = igEnabled,
+            mode = igMode,
+            budgetMinutes = igBudget,
+            onEnabledChange = { igEnabled = it; prefs.instagramReelBlockEnabled = it },
+            onModeChange = { igMode = it; prefs.instagramReelBlockMode = it },
+            onBudgetMinutesChange = { igBudget = it; prefs.instagramReelBudgetMinutes = it }
+        )
+
+        ReelBlockPlatformCard(
+            title = "YouTube Shorts",
+            enabled = ytEnabled,
+            mode = ytMode,
+            budgetMinutes = ytBudget,
+            onEnabledChange = { ytEnabled = it; prefs.youtubeShortsBlockEnabled = it },
+            onModeChange = { ytMode = it; prefs.youtubeShortsBlockMode = it },
+            onBudgetMinutesChange = { ytBudget = it; prefs.youtubeShortsBudgetMinutes = it }
+        )
+    }
+}
+
+@Composable
+private fun ReelBlockPlatformCard(
+    title: String,
+    enabled: Boolean,
+    mode: ReelBlockMode,
+    budgetMinutes: Int,
+    onEnabledChange: (Boolean) -> Unit,
+    onModeChange: (ReelBlockMode) -> Unit,
+    onBudgetMinutesChange: (Int) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(DarkSurface)
+            .padding(16.dp)
+    ) {
+        SectionTitle(title, enabled, onEnabledChange)
+
+        if (enabled) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(DarkElevated)
+                    .padding(4.dp)
+            ) {
+                ReelBlockMode.entries.forEach { option ->
+                    val isSelected = option == mode
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSelected) PurplePrimary else Color.Transparent)
+                            .clickable { onModeChange(option) }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (option == ReelBlockMode.INSTANT) "Anında" else "Süre Sınırı",
+                            color = if (isSelected) Color.White else TextSecondary,
+                            fontSize = 12.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
+            if (mode == ReelBlockMode.BUDGET) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    IconButton(onClick = { if (budgetMinutes > 5) onBudgetMinutesChange(budgetMinutes - 5) }) {
+                        Icon(Icons.Default.Remove, null, tint = PurpleLight)
+                    }
+                    Text("$budgetMinutes Dakika/gün", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = { onBudgetMinutesChange(budgetMinutes + 5) }) {
+                        Icon(Icons.Default.Add, null, tint = PurpleLight)
+                    }
+                }
+            }
         }
     }
 }
