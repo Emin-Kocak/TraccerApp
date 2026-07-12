@@ -53,9 +53,11 @@ class UserPreferences(context: Context) {
         set(value) { prefs.edit().putBoolean("instagram_reel_block_enabled", value).apply() }
 
     var instagramReelBlockMode: ReelBlockMode
-        get() = ReelBlockMode.valueOf(
-            prefs.getString("instagram_reel_block_mode", ReelBlockMode.INSTANT.name) ?: ReelBlockMode.INSTANT.name
-        )
+        get() = runCatching {
+            ReelBlockMode.valueOf(
+                prefs.getString("instagram_reel_block_mode", ReelBlockMode.INSTANT.name) ?: ReelBlockMode.INSTANT.name
+            )
+        }.getOrDefault(ReelBlockMode.INSTANT)
         set(value) { prefs.edit().putString("instagram_reel_block_mode", value.name).apply() }
 
     var instagramReelBudgetMinutes: Int
@@ -67,9 +69,11 @@ class UserPreferences(context: Context) {
         set(value) { prefs.edit().putBoolean("youtube_shorts_block_enabled", value).apply() }
 
     var youtubeShortsBlockMode: ReelBlockMode
-        get() = ReelBlockMode.valueOf(
-            prefs.getString("youtube_shorts_block_mode", ReelBlockMode.INSTANT.name) ?: ReelBlockMode.INSTANT.name
-        )
+        get() = runCatching {
+            ReelBlockMode.valueOf(
+                prefs.getString("youtube_shorts_block_mode", ReelBlockMode.INSTANT.name) ?: ReelBlockMode.INSTANT.name
+            )
+        }.getOrDefault(ReelBlockMode.INSTANT)
         set(value) { prefs.edit().putString("youtube_shorts_block_mode", value.name).apply() }
 
     var youtubeShortsBudgetMinutes: Int
