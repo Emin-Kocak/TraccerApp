@@ -47,6 +47,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import com.example.traccerapp.data.ReelBlockMode
+import com.example.traccerapp.data.UserPreferences
+import com.example.traccerapp.service.reeldetection.ReelDetectorRegistry
+import com.example.traccerapp.service.reeldetection.hasExceededReelBudget
+import com.example.traccerapp.service.reeldetection.isReelBlockSuppressed
 
 class AppAccessibilityService : AccessibilityService() {
 
@@ -55,6 +60,8 @@ class AppAccessibilityService : AccessibilityService() {
         private const val TAG               = "AppAccessibilityService"
         private const val FLUSH_INTERVAL_MS = 10 * 60 * 1000L
         private const val BLOCK_COOLDOWN_MS = 800L
+        private const val REEL_CHECK_THROTTLE_MS = 500L
+        private const val REEL_SUPPRESS_DURATION_MS = 60 * 60 * 1000L
         /** Foreground'daki app'i periyodik limit kontrolü için tik aralığı (madde 25/13). */
         private const val IN_APP_CHECK_INTERVAL_MS = 30 * 1000L
 
@@ -106,6 +113,7 @@ class AppAccessibilityService : AccessibilityService() {
 
     // ─── DB ───────────────────────────────────────────────────────────────────
     private lateinit var db: AppDatabase
+    private lateinit var userPrefs: UserPreferences
 
     // ─── In-Memory Tracking ───────────────────────────────────────────────────
     private val dailyUsageMs          = ConcurrentHashMap<String, Long>()
@@ -118,6 +126,14 @@ class AppAccessibilityService : AccessibilityService() {
     // ─── Blocking Cooldown ────────────────────────────────────────────────────
     @Volatile private var lastBlockedPackage: String? = null
     @Volatile private var lastBlockedTime: Long       = 0L
+
+    // ─── Reels/Shorts Engelleme State ──────────────────────────────────────────
+    private val reelUsageMs = ConcurrentHashMap<String, Long>()
+    @Volatile private var reelContentStartMs: Long? = null
+    @Volatile private var reelContentPackage: String? = null
+    private val reelSuppressUntilMs = ConcurrentHashMap<String, Long>()
+    @Volatile private var reelUsageDayStart: Long = 0L
+    @Volatile private var lastReelCheckMs: Long = 0L
 
     // ─── Overlay State ────────────────────────────────────────────────────────
     private var windowManager: WindowManager? = null
@@ -148,7 +164,9 @@ class AppAccessibilityService : AccessibilityService() {
     override fun onCreate() {
         super.onCreate()
         db            = AppDatabase.getDatabase(this)
+        userPrefs     = UserPreferences(this)
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        reelUsageDayStart = getTodayStartMs()
 
         loadTodayUsageFromDB()
         observeLimitsCache()
@@ -173,6 +191,7 @@ class AppAccessibilityService : AccessibilityService() {
         inAppCheckJob?.cancel()
         unregisterReceiver(screenReceiver)
         commitCurrentSession()
+        commitReelSession()
         removeOverlay()   // WindowLeaked önle
         runBlocking(Dispatchers.IO) { flushToDBSuspend() }
         serviceJob.cancel()
@@ -185,6 +204,10 @@ class AppAccessibilityService : AccessibilityService() {
     // ═══════════════════════ Core Event Handler ════════════════════════════════
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            checkReelContent()
+            return
+        }
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val newPackage = event.packageName?.toString() ?: return
 
@@ -202,6 +225,7 @@ class AppAccessibilityService : AccessibilityService() {
 
         val now = System.currentTimeMillis()
         commitSessionAt(now)
+        commitReelSession(now)
 
         currentPackage = newPackage
         sessionStartMs = now
@@ -275,6 +299,107 @@ class AppAccessibilityService : AccessibilityService() {
         mainHandler.post { showBlockingOverlay(packageName, appName, reason) }
     }
 
+    // ═══════════════════════ Reels/Shorts Engelleme ════════════════════════════
+
+    private fun checkReelContent() {
+        val pkg = currentPackage ?: return
+        if (blockedOverlayPackage != null) return // overlay zaten gösteriliyor
+        val detector = ReelDetectorRegistry.detectorFor(pkg) ?: return
+        if (!isReelBlockEnabledFor(pkg)) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastReelCheckMs < REEL_CHECK_THROTTLE_MS) return
+        lastReelCheckMs = now
+
+        val root = rootInActiveWindow ?: return
+        val isReel = try {
+            detector.isReelContent(root)
+        } finally {
+            root.recycle()
+        }
+        handleReelDetectionResult(pkg, isReel, now)
+    }
+
+    private fun isReelBlockEnabledFor(pkg: String): Boolean = when (pkg) {
+        "com.instagram.android", "com.instagram.lite" -> userPrefs.instagramReelBlockEnabled
+        "com.google.android.youtube" -> userPrefs.youtubeShortsBlockEnabled
+        else -> false
+    }
+
+    private fun reelBlockModeFor(pkg: String): ReelBlockMode = when (pkg) {
+        "com.instagram.android", "com.instagram.lite" -> userPrefs.instagramReelBlockMode
+        else -> userPrefs.youtubeShortsBlockMode
+    }
+
+    private fun reelBudgetMinutesFor(pkg: String): Int = when (pkg) {
+        "com.instagram.android", "com.instagram.lite" -> userPrefs.instagramReelBudgetMinutes
+        else -> userPrefs.youtubeShortsBudgetMinutes
+    }
+
+    private fun handleReelDetectionResult(pkg: String, isReel: Boolean, now: Long) {
+        if (isReel) {
+            if (reelContentStartMs == null) {
+                reelContentStartMs = now
+                reelContentPackage = pkg
+            }
+            evaluateReelBlock(pkg, now)
+        } else {
+            commitReelSession(now)
+        }
+    }
+
+    private fun evaluateReelBlock(pkg: String, now: Long) {
+        if (isReelBlockSuppressed(reelSuppressUntilMs[pkg] ?: 0L, now)) return
+
+        when (reelBlockModeFor(pkg)) {
+            ReelBlockMode.INSTANT -> triggerReelBlock(pkg)
+            ReelBlockMode.BUDGET -> {
+                resetReelUsageIfNewDay(now)
+                val liveElapsed = (now - (reelContentStartMs ?: now)).coerceAtLeast(0L)
+                val accumulated = (reelUsageMs[pkg] ?: 0L) + liveElapsed
+                if (hasExceededReelBudget(accumulated, reelBudgetMinutesFor(pkg))) {
+                    triggerReelBlock(pkg)
+                }
+            }
+        }
+    }
+
+    private fun commitReelSession(now: Long = System.currentTimeMillis()) {
+        val start = reelContentStartMs ?: return
+        val pkg = reelContentPackage ?: return
+        reelContentStartMs = null
+        reelContentPackage = null
+        val elapsed = (now - start).coerceAtLeast(0L)
+        resetReelUsageIfNewDay(now)
+        reelUsageMs.merge(pkg, elapsed, Long::plus)
+    }
+
+    private fun resetReelUsageIfNewDay(now: Long) {
+        val todayStart = getTodayStartMs()
+        if (reelUsageDayStart != todayStart) {
+            reelUsageMs.clear()
+            reelUsageDayStart = todayStart
+        }
+    }
+
+    private fun triggerReelBlock(packageName: String) {
+        val now = System.currentTimeMillis()
+        if (packageName == lastBlockedPackage && now - lastBlockedTime < BLOCK_COOLDOWN_MS) return
+        lastBlockedPackage = packageName
+        lastBlockedTime = now
+        val appName = AppInfoUtils.getAppName(this, packageName)
+        mainHandler.post {
+            showBlockingOverlay(
+                packageName = packageName,
+                appName = appName,
+                reason = "Sonsuz kaydırma sınırı",
+                onAllowTemporarily = {
+                    reelSuppressUntilMs[packageName] = System.currentTimeMillis() + REEL_SUPPRESS_DURATION_MS
+                }
+            )
+        }
+    }
+
     // ═══════════════════════ Accessibility Overlay ════════════════════════════
 
     /**
@@ -286,7 +411,12 @@ class AppAccessibilityService : AccessibilityService() {
      * 2. ComposeView.setContent { } ile UI çiz
      * 3. WindowManager.addView() ile ekrana ekle
      */
-    private fun showBlockingOverlay(packageName: String, appName: String, reason: String) {
+    private fun showBlockingOverlay(
+        packageName: String,
+        appName: String,
+        reason: String,
+        onAllowTemporarily: (() -> Unit)? = null
+    ) {
         // Zaten bir overlay varsa önce kaldır
         if (overlayView != null) removeOverlayInternal()
 
@@ -319,6 +449,12 @@ class AppAccessibilityService : AccessibilityService() {
                     onGoHome  = {
                         removeOverlay()
                         performGlobalAction(GLOBAL_ACTION_HOME)
+                    },
+                    onAllowTemporarily = onAllowTemporarily?.let { callback ->
+                        {
+                            callback()
+                            removeOverlay()
+                        }
                     }
                 )
             }
@@ -367,7 +503,8 @@ class AppAccessibilityService : AccessibilityService() {
         appName: String,
         packageName: String,
         reason: String,
-        onGoHome: () -> Unit
+        onGoHome: () -> Unit,
+        onAllowTemporarily: (() -> Unit)? = null
     ) {
         Box(
             modifier = Modifier
@@ -452,6 +589,16 @@ class AppAccessibilityService : AccessibilityService() {
                         fontWeight = FontWeight.SemiBold,
                         color      = Color.White
                     )
+                }
+
+                if (onAllowTemporarily != null) {
+                    TextButton(onClick = onAllowTemporarily) {
+                        Text(
+                            text     = "1 saat izin ver",
+                            fontSize = 13.sp,
+                            color    = Color(0xFF9CA3AF)
+                        )
+                    }
                 }
             }
         }
