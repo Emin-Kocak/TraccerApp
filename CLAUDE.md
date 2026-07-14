@@ -164,29 +164,28 @@ Kullanıcı isteğiyle tek oturumda yapılan bağımsız 5 iyileştirme:
 
 Derleme (`compileDebugKotlin`) tüm değişikliklerden sonra BUILD SUCCESSFUL. Cihaz doğrulaması kullanıcıda: (2) için servisi bir gün kapalı bırakıp ertesi gün açma senaryosu, (5) için bir uygulamayı limit dolana kadar açık tutup uygulamadan çıkmadan bloklanıp bloklanmadığı test edilmeli.
 
+### 26. Sonsuz Kaydırma (Reels/Shorts) Engelleme — yeni (2026-07-09)
+AppLimit'ten (uygulama bazlı günlük dakika limiti) **bağımsız** yeni engelleme katmanı: Instagram'ın Home/DM/Profil'ini etkilemeden yalnızca **Reels**, YouTube'da yalnızca **Shorts** oynatıcısı algılanınca engeller. TikTok kapsam dışı (ana akışı zaten tamamen kısa-video, "sadece reels'i ayırma" anlamsız — mevcut AppLimit yeterli; mimari sonradan eklemeye açık). Spec: `docs/superpowers/specs/2026-07-09-reels-shorts-blocker-design.md`, plan: `docs/superpowers/plans/2026-07-09-reels-shorts-blocker.md`.
+
+- **Tespit** (`service/reeldetection/`): `ReelDetector` arayüzü + `InstagramReelDetector`/`YouTubeShortsDetector` — her biri node ağacında o platformun kendi iç `viewIdResourceName`'lerini arıyor (`NodeSearch.containsViewId`, leak-safe recycle). Instagram: `clips_viewer_container`/`clips_video_container`/`clips_video_view_pager`; YouTube: `reel_player_page_container`/`reels_viewer_container`/`shorts_main_container`. Bunlar platformun kod isimleri → metin/dilden bağımsız. `ReelDetectorRegistry` paket→detector eşlemesi. **Tab-seçili/kelime/uzamsal doğrulama katmanı YOK** (v1 bilinçli sade, YAGNI — yanlış-pozitif görülürse eklenir). Teknik, kullanıcının kendi cihazına kurulu rakip bir app'in (JADX ile decompile, kişisel/eğitim) genel yaklaşımından ilham aldı — **kodu kopyalanmadı**, orijinal Kotlin yazıldı.
+- **Event akışı**: `accessibility_service_config.xml`'e `typeWindowContentChanged` eklendi (madde 17/18'deki `typeWindowStateChanged` yanına) — Instagram/YouTube içinde sekme değişimini (paket değişmeden) yakalamak için gerekliydi. `AppAccessibilityService.onAccessibilityEvent` content-changed dalında `checkReelContent()` çağırıyor; 500ms throttle (`REEL_CHECK_THROTTLE_MS`) **pahalı işlerden (SharedPreferences okuması + node taraması) ÖNCE** — hızlı kaydırmada pil/CPU korunuyor. Registry'de karşılığı olmayan pakette hiç node taranmıyor.
+- **İki mod, kullanıcı platform başına seçiyor** (`BlockingSettingsScreen` → "Sonsuz Kaydırma Engelleme" kartları; `UserPreferences.instagramReelBlockMode`/`youtubeShortsBlockMode`, `enum ReelBlockMode { INSTANT, BUDGET }`): **INSTANT** tespit anında bloklar; **BUDGET** `dailyUsageMs` (madde 25) ile aynı ruhta ayrı `reelUsageMs` sayacı biriktirir, günlük dakika bütçesini (`*BudgetMinutes`, varsayılan 15) aşınca bloklar. Bütçe sayacı **yalnızca in-memory** (DB'ye yazılmaz) — servis restart'ında sıfırlanır, kabul edilebilir risk (madde 13'teki `dailyUsageMs` kadar kritik değil). Reel oturumu paket değişiminde (ignore edilen launcher/Home dahil) ve içerik reel'den çıkınca commit edilir; gece yarısını aşan tek oturum bittiği güne yazılır (madde 21 ruhu).
+- **Overlay**: mevcut `showBlockingOverlay`/`BlockingOverlayContent` (madde 2) opsiyonel `onAllowTemporarily` parametresiyle genişletildi — `null` ise (AppLimit blokları) davranış değişmedi; reel-blok çağrılarında "1 saat izin ver" butonu (`reelSuppressUntilMs[pkg] = now + 1sa`, her iki modda aynı). AppLimit engelleme yolu (`checkAndBlockIfNeeded`/`triggerBlock`) hiç değişmedi.
+- **Test**: `ReelDetectorRegistry` + `ReelBlockLogic` (bütçe/susturma saf mantığı) için gerçek JUnit unit testleri — **projedeki ilk `app/src/test/` dosyaları** (zaten var olan `testImplementation(libs.junit)`, yeni bağımlılık yok). `AccessibilityNodeInfo`'ya bağımlı kod (detector'lar, servis kablolama) proje konvansiyonuyla (Robolectric yok) derleme + cihaz testiyle doğrulanır.
+- **Şema/migration YOK** — tüm yeni state `UserPreferences` (SharedPreferences) veya servis içinde in-memory. Tam derleme + tüm unit testler BUILD SUCCESSFUL. **Cihaz doğrulaması kullanıcıda** (aşağıya bkz).
+
+**Cihazda test edilecek (emülatör/otomatik cihaz testi yok):**
+1. Ayarlar → Limitler → "Sonsuz Kaydırma Engelleme" → Instagram Reels aç, "Anında" → Reels'e gir → anında overlay + geri tuşu.
+2. "1 saat izin ver" → 1 saat boyunca Reels bloklanmamalı.
+3. Instagram "Süre Sınırı" (ör. 5dk) → Reels'te toplam 5dk (sekme değiştirip dönse bile birikmeli) → blok.
+4. Instagram Home/DM/Profil/arama → hiç blok tetiklenmemeli (Reels'e girilmediyse).
+5. Aynı 4 senaryo YouTube Shorts için.
+6. TikTok bu özellikten etkilenmiyor (ayarlarda seçenek yok).
+7. Mevcut AppLimit davranışı hiç değişmedi (regresyon — madde 1/13/25).
+
 ## Devam eden / ertelenmiş iş
 
-### ⚠️ YARIM KALAN İŞ: Reels/Shorts engelleme — subagent-driven-development yürütmesi ortasında durduruldu (2026-07-09)
-
-**Plan**: `docs/superpowers/plans/2026-07-09-reels-shorts-blocker.md` (8 görev, tam kod dahil). **Spec**: `docs/superpowers/specs/2026-07-09-reels-shorts-blocker-design.md`. Kullanıcı "Subagent-Driven Development" yöntemini seçti (superpowers:subagent-driven-development skill) — her görev için: implementer subagent → spec-compliance reviewer subagent → code-quality reviewer subagent → görev tamamlandı işaretle → sıradaki göreve geç.
-
-**Durum:**
-- ✅ **Task 1** (tespit arayüzü + node arama + Instagram/YouTube detector) — implement edildi, spec ✅, kalite ✅ (1 minor docstring düzeltmesi ben tarafımdan yapıldı, commit `8006691`). Tamamlandı, commit'lendi.
-- ✅ **Task 2** (ReelDetectorRegistry, TDD) — implement edildi, spec ✅, kalite ✅ (0 bulgu). Tamamlandı, commit `83b8e06`.
-- ✅ **Task 3** (ReelBlockLogic bütçe/susturma mantığı, TDD) — implement edildi, spec ✅, kalite ✅ (2 ek sınır-durum testi ben tarafımdan eklendi, commit `0482d57`). Tamamlandı, commit'lendi.
-- ⚠️ **Task 4** (accessibility_service_config.xml — `typeWindowContentChanged` event tipi eklenmesi) — implementer subagent dispatch edildi, dosyayı **doğru şekilde değiştirdi** (plandaki Step 1 ile birebir eşleşiyor, doğruladım) ama **kullanıcı görev başlamadan/derleme-commit adımına gelmeden durdurdu**. Şu an `app/src/main/res/xml/accessibility_service_config.xml` working tree'de commit edilmemiş halde duruyor, içeriği doğru — SİLİNMEMELİ. Kalan adımlar: derleme kontrolü (`./gradlew.bat :app:compileDebugKotlin --console=plain`) → commit (`git add app/src/main/res/xml/accessibility_service_config.xml && git commit -m "feat: listen for window content changes to detect in-app reel navigation"` — **attribution trailer EKLEME**) → spec-compliance reviewer subagent → code-quality reviewer subagent.
-- ⏳ **Task 5-8** hiç başlanmadı: UserPreferences platform ayarları, AppAccessibilityService kablolama, BlockingSettingsScreen UI, tam doğrulama+CLAUDE.md madde 26. Tam metinleri plan dosyasında.
-
-**Devam ederken dikkat edilecekler:**
-- Model seçimi: mekanik görevler (1,2,3,4,5,8) implementer = haiku; entegrasyon görevleri (6,7 — çok dosyalı/çok noktalı düzenleme) implementer = sonnet; **her iki reviewer (spec-compliance + code-quality) her görevde = opus** (bu düzen Task 1-3'te tutarlı uygulandı).
-- **Commit mesajlarına asla "Co-Authored-By" veya AI-attribution trailer eklenmeyecek** (kullanıcının global ayarı, `~/.claude/settings.json`'da devre dışı) — implementer subagent promptlarına bu talimat açıkça yazılmalı (Task 2'de bir subagent bunu atlamıştı, sonraki görevlerde promptların içine "IMPORTANT — commit message trailer" notu eklendi, bu şablon korunmalı).
-- Reviewer'lar rapor edilen commit SHA'sını/test sonucunu KÖRÜKÖRÜNE güvenmiyor, `git show`/testleri kendisi tekrar çalıştırıyor — bu disiplin korunmalı.
-- Görev 1 ve 3'te reviewer'ların bulduğu minor sorunları (docstring yanlış referans, eksik sınır testi) ben doğrudan düzelttim (ayrı bir implementer subagent turu açmadım) — trivial/tek satırlık düzeltmeler için bu kabul edilebilir, ama görevin asıl implementasyonunu subagent'a bırakma prensibi korunmalı.
-- Reel-blocker'a başlamadan önce, bu konuşmadan önce birikmiş commit edilmemiş iş (madde 12-25 + CLAUDE.md) tek bir commit'te (`eb7ca02` + `9cf6c4f`) toplanıp temiz bir başlangıç noktası oluşturuldu — bu artık geçmişte, tekrar gerekmiyor.
-
-**Devam etmek için**: kullanıcıya "reel-blocker planına Task 4'ten devam et" denildiğinde, önce working tree'deki commit edilmemiş XML değişikliğini derleme+commit ile tamamla, sonra Task 4'ün review adımlarını (spec+kalite) çalıştır, sonra Task 5'e geç — subagent-driven-development skill'inin "Continuous execution" ilkesine göre (kullanıcı tekrar durdurmadıkça) 8. göreve kadar durmadan devam edilmeli.
-
-- **Sonsuz kaydırma (Instagram Reels/Keşfet vb.) süre sınırı özelliği**: detaylı konuşuldu, altyapı Instagram'a özel ama genişletilebilir şekilde planlandı, sonra **kullanıcı tarafından erteledi**. TikTok/YouTube Shorts'a da genişletilmesi isteniyor ileride. Henüz kod yazılmadı.
+(Şu an bekleyen/ertelenmiş iş yok — reel-blocker özelliği tamamlandı, cihaz doğrulaması kullanıcıda.)
 
 ## Doğrulama notu
 
