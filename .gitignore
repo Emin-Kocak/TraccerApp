@@ -18,3 +18,12 @@ Thumbs.db
 
 # IntelliJ / Android Studio proje dosyaları
 *.iws
+
+# İmzalama — ASLA commit etme (kaybedilirse güncelleme imkânsız hâle gelir)
+keystore.properties
+*.jks
+*.keystore
+
+# Firebase servis hesabı anahtarı (kullanılırsa)
+*service-account*.json
+google-services.json

@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.compose.compiler)
@@ -18,8 +20,30 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // ─── Release imzalama ───────────────────────────────────────────────────
+    // keystore.properties (git'e GİRMEZ) varsa release APK gerçek anahtarla imzalanır.
+    // Yoksa build kırılmaz; release APK imzasız üretilir. Dağıtımdan önce keystore şart —
+    // bkz. docs/DISTRIBUTION.md. Aynı anahtar tüm gelecek güncellemeleri imzalamalı.
+    val keystorePropertiesFile = rootProject.file("keystore.properties")
+    val hasKeystore = keystorePropertiesFile.exists()
+    val keystoreProperties = Properties().apply {
+        if (hasKeystore) load(keystorePropertiesFile.inputStream())
+    }
+
+    signingConfigs {
+        if (hasKeystore) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasKeystore) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
