@@ -80,16 +80,17 @@ versionName = "1.1"
 
 ### B3. Testçilere dağıt
 
-`<APP_ID>` yerine A3'te aldığın App ID'yi yaz:
+Bu projenin gerçek değerleriyle (PowerShell, tek satır — repo kökünde çalıştır):
 
-```bash
-firebase appdistribution:distribute app/build/outputs/apk/release/app-release.apk \
-  --app <APP_ID> \
-  --groups "friends" \
-  --release-notes "Reels/Shorts engelleme düzeltmeleri"
+```powershell
+firebase appdistribution:distribute app/build/outputs/apk/release/app-release.apk --app 1:751093979110:android:32e7dd27428da92d826827 --groups "arkadaşlar" --release-notes "Değişiklik notu"
 ```
 
-Bu kadar. Arkadaşların **bildirim** alır ve **App Tester** uygulamasından tek dokunuşla günceller.
+Bu kadar. Testçiler **bildirim** alır ve **App Tester** uygulamasından tek dokunuşla günceller.
+
+> **Grup gotcha'sı:** `--groups` grubun **alias**'ını kullanır (görünen adını değil). Mevcut grup alias'ı `arkadaşlar`.
+> Yeni grup eklersen alias'ı `firebase appdistribution:group:list --project traccerapp-cc1ec` ile öğren.
+> Grup yerine doğrudan e-postalara göndermek istersen: `--testers "a@x.com,b@y.com"` (grup gerekmez).
 
 > İlk seferde her arkadaşın: davet e-postasındaki linke tıklar → **App Tester**'ı kurar → uygulamayı oradan indirir.
 > Sonraki güncellemelerde sadece bildirim gelir, "Update" derler.
