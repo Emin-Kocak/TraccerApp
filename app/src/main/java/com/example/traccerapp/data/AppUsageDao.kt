@@ -23,7 +23,7 @@ interface AppUsageDao {
     @Query("SELECT * FROM app_limits WHERE packageName = :packageName")
     suspend fun getLimitForApp(packageName: String): AppLimit?
 
-    @Query("SELECT * FROM app_limits WHERE isTimeLimitEnabled = 1 OR isScheduleEnabled = 1")
+    @Query("SELECT * FROM app_limits WHERE isTimeLimitEnabled = 1 OR isScheduleEnabled = 1 OR isSessionPromptEnabled = 1")
     fun getActiveLimits(): Flow<List<AppLimit>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

@@ -44,4 +44,6 @@ data class AppLimit(
     val blockStartMinute: Int = 0,
     val blockEndHour: Int = 8,              // 08:00
     val blockEndMinute: Int = 0,
+    // Oturum bazlı izin: girişte "bu oturumda kaç dakika?" sorulsun mu (spec: 2026-07-17)
+    val isSessionPromptEnabled: Boolean = false,
 )

@@ -63,7 +63,7 @@ fun BlockingSettingsScreen() {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // Aktif limitler
-            val active = activeLimits.filter { it.isTimeLimitEnabled || it.isScheduleEnabled }
+            val active = activeLimits.filter { it.isTimeLimitEnabled || it.isScheduleEnabled || it.isSessionPromptEnabled }
             if (active.isNotEmpty()) {
                 item {
                     Text("Aktif Limitler", color = TextSecondary, fontSize = 13.sp,
@@ -155,6 +155,12 @@ fun ActiveLimitRow(limit: AppLimit, onClick: () -> Unit) {
                     Icon(Icons.Default.Schedule, null, tint = PurpleLight, modifier = Modifier.size(12.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("Plan Aktif", color = PurpleLight, fontSize = 11.sp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                if (limit.isSessionPromptEnabled) {
+                    Icon(Icons.Default.HourglassEmpty, null, tint = StatusBlue, modifier = Modifier.size(12.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Oturum", color = StatusBlue, fontSize = 11.sp)
                 }
             }
         }
@@ -198,6 +204,7 @@ fun LimitSettingsContent(
     var startMin by remember { mutableIntStateOf(existingLimit?.blockStartMinute ?: 0) }
     var endHour by remember { mutableIntStateOf(existingLimit?.blockEndHour ?: 8) }
     var endMin by remember { mutableIntStateOf(existingLimit?.blockEndMinute ?: 0) }
+    var isSessionPromptEnabled by remember { mutableStateOf(existingLimit?.isSessionPromptEnabled ?: false) }
 
     Column(
         modifier = Modifier.fillMaxWidth().padding(24.dp).padding(bottom = 32.dp)
@@ -276,6 +283,18 @@ fun LimitSettingsContent(
             }
         }
 
+        Spacer(modifier = Modifier.height(24.dp))
+
+        SectionTitle("Girişte Süre Sor", isSessionPromptEnabled) { isSessionPromptEnabled = it }
+        if (isSessionPromptEnabled) {
+            Text(
+                "Uygulamayı her açtığında o oturum için süre seçersin; süre dolunca engellenir.",
+                color = TextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+
         Spacer(modifier = Modifier.height(32.dp))
 
         Button(
@@ -291,7 +310,8 @@ fun LimitSettingsContent(
                         blockStartHour = startHour,
                         blockStartMinute = startMin,
                         blockEndHour = endHour,
-                        blockEndMinute = endMin
+                        blockEndMinute = endMin,
+                        isSessionPromptEnabled = isSessionPromptEnabled
                     )
                 )
             },

@@ -1,6 +1,7 @@
 package com.example.traccerapp
 
 import android.app.AppOpsManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -8,7 +9,6 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
-import android.view.accessibility.AccessibilityManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -80,13 +80,16 @@ class MainActivity : ComponentActivity() {
     }
 
     fun isAccessibilityServiceEnabled(): Boolean {
-        val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
         val enabledServices = Settings.Secure.getString(
             contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
-        val componentName = "${packageName}/${AppAccessibilityService::class.java.name}"
-        return enabledServices.split(":").any { it.equals(componentName, ignoreCase = true) }
+        // Ayar, bileşeni kısa formda da saklayabilir ("paket/.service.Sınıf") — düz string
+        // karşılaştırması bunu kaçırıp servis açıkken "izin gerekli" uyarısı gösterirdi.
+        val expected = ComponentName(this, AppAccessibilityService::class.java)
+        return enabledServices.split(":").any { entry ->
+            ComponentName.unflattenFromString(entry) == expected
+        }
     }
 
     private fun requestUsageStatsPermission() {

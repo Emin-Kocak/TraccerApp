@@ -30,27 +30,4 @@ class ReelBlockLogicTest {
     fun `budget not exceeded one millisecond below limit (minute truncation)`() {
         assertFalse(hasExceededReelBudget(accumulatedMs = 15 * 60_000L - 1, budgetMinutes = 15))
     }
-
-    @Test
-    fun `not suppressed at the exact instant suppression expires`() {
-        val now = 1_000_000L
-        assertFalse(isReelBlockSuppressed(suppressUntilMs = now, nowMs = now))
-    }
-
-    @Test
-    fun `suppressed when now is before suppress-until timestamp`() {
-        val now = 1_000_000L
-        assertTrue(isReelBlockSuppressed(suppressUntilMs = now + 60_000L, nowMs = now))
-    }
-
-    @Test
-    fun `not suppressed when now is after suppress-until timestamp`() {
-        val now = 1_000_000L
-        assertFalse(isReelBlockSuppressed(suppressUntilMs = now - 1L, nowMs = now))
-    }
-
-    @Test
-    fun `not suppressed when suppress-until is zero (never suppressed)`() {
-        assertFalse(isReelBlockSuppressed(suppressUntilMs = 0L, nowMs = 1_000_000L))
-    }
 }

@@ -1,5 +1,6 @@
 package com.example.traccerapp.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -63,6 +64,17 @@ fun MainScreen(
     var hasAccessibility by remember { mutableStateOf(isAccessibilityEnabled()) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var currentScreen by remember { mutableStateOf<Screen>(Screen.Main) }
+
+    // Push ekranlar (Report/Detail/Settings) yalnızca kendi TopAppBar geri okuna bağlıydı —
+    // sistem/fiziksel geri tuşu hiç ele alınmıyordu, bu yüzden kullanıcı geri tuşuna basınca
+    // bir üst ekrana dönmek yerine uygulamadan direkt çıkıyordu. Main'deyken devre dışı: sistem
+    // varsayılan davranışı (arka plana at) korunsun.
+    BackHandler(enabled = currentScreen != Screen.Main) {
+        currentScreen = when (currentScreen) {
+            is Screen.Detail -> Screen.Report
+            else -> Screen.Main
+        }
+    }
 
     // Ekran her resume olduğunda accessibility durumunu yeniden kontrol et
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -245,15 +257,9 @@ fun DashboardTab(
     val prefs = remember { UserPreferences(context) }
     val db = remember { AppDatabase.getDatabase(context) }
 
-    // Başlangıç zamanını hesapla
-    val todayStart = remember {
-        Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
-    }
+    // Gün başlangıcı — gece yarısında otomatik güncellenir (madde 27). Sabit `remember{}` ile
+    // hesaplansaydı uzun ömürlü composition dünün gününde donar, ertesi gün dünkü veriyi gösterirdi.
+    val todayStart = rememberTodayStart()
 
     // DB'den doğrudan bugünün loglarını oku (ReportsScreen gibi)
     val logsFlow = remember(todayStart) {
@@ -269,8 +275,9 @@ fun DashboardTab(
             .sortedByDescending { it.durationMs }
     }
 
-    // Veriyi yenile - DB'ye kaydetmek için
-    LaunchedEffect(Unit) {
+    // Veriyi yenile - DB'ye kaydetmek için. todayStart'a bağlı: gün dönünce yeni günün verisi çekilir
+    // (aksi halde düzeltilmiş sorgu, henüz yazılmamış boş kovaya düşerdi — madde 27).
+    LaunchedEffect(todayStart) {
         viewModel.refreshUsageStats()
     }
 
@@ -302,7 +309,7 @@ fun DashboardTab(
     // Saatlik kullanım dakikası (UsageStatsManager event'lerinden — DB'de saat kırılımı yok)
     val idleColor = DarkBorder
     var hourBlocks by remember { mutableStateOf<List<HourBlock>>(emptyList()) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(todayStart) {
         hourBlocks = fetchTodayHourBlocks(context, idleColor)
     }
     val hourlyUsageMinutes: List<Int> = remember(hourBlocks) {

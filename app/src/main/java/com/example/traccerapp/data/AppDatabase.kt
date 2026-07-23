@@ -26,7 +26,14 @@ private val MIGRATION_2_3 = object : Migration(2, 3) {
     }
 }
 
-@Database(entities = [UsageLog::class, AppLimit::class, UnlockEvent::class, PhoneSession::class], version = 3, exportSchema = false)
+/** v3 → v4: uygulama başına "girişte süre sor" (oturum bazlı izin) bayrağı. Mevcut veriyi korur. */
+private val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `app_limits` ADD COLUMN `isSessionPromptEnabled` INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+@Database(entities = [UsageLog::class, AppLimit::class, UnlockEvent::class, PhoneSession::class], version = 4, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun appUsageDao(): AppUsageDao
 
@@ -41,7 +48,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "traccer_database_v2"  // Yeni isim = temiz başlangıç
                 )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 // Destructive fallback SADECE debug'da: release'te migration unutulursa
                 // kullanıcı verisini sessizce silmek yerine yüksek sesle çöksün (madde 25).
                 if (BuildConfig.DEBUG) {

@@ -10,6 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Timelapse
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -138,7 +139,7 @@ fun UsageAnalysisTab() {
     val prefs = remember { UserPreferences(context) }
 
     var selectedPeriod by remember { mutableStateOf(AnalysisPeriod.DAILY) }
-    val today = remember { startOfDay(System.currentTimeMillis()) }
+    val today = rememberTodayStart() // gece yarısında güncellenir (madde 27)
 
     // İki ay geriye kadar tek seferde çekilen geniş aralık — sekme değişince yeniden sorgu atmaz,
     // kıyaslama Kotlin tarafında hesaplanır (bkz. CLAUDE.md madde 5).
@@ -344,7 +345,12 @@ private fun TrendCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (percentChange != null) {
                     Icon(
-                        imageVector = if (isIncrease) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
+                        // ±0.5 bandı "değişmedi" sayılır — orada aşağı ok göstermek yanıltıcı olurdu
+                        imageVector = when {
+                            isIncrease -> Icons.Default.ArrowUpward
+                            isDecrease -> Icons.Default.ArrowDownward
+                            else -> Icons.Default.Remove
+                        },
                         contentDescription = null,
                         tint = deltaColor,
                         modifier = Modifier.size(14.dp)

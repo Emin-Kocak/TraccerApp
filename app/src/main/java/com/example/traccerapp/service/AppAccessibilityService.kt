@@ -51,7 +51,12 @@ import com.example.traccerapp.data.ReelBlockMode
 import com.example.traccerapp.data.UserPreferences
 import com.example.traccerapp.service.reeldetection.ReelDetectorRegistry
 import com.example.traccerapp.service.reeldetection.hasExceededReelBudget
-import com.example.traccerapp.service.reeldetection.isReelBlockSuppressed
+import com.example.traccerapp.service.sessionprompt.SESSION_PRESET_MINUTES
+import com.example.traccerapp.service.sessionprompt.clampSessionMinutes
+import com.example.traccerapp.service.sessionprompt.deductSessionBudget
+import com.example.traccerapp.service.sessionprompt.isSessionExpired
+import com.example.traccerapp.service.sessionprompt.shouldPromptForSession
+import androidx.compose.foundation.clickable
 
 class AppAccessibilityService : AccessibilityService() {
 
@@ -61,7 +66,11 @@ class AppAccessibilityService : AccessibilityService() {
         private const val FLUSH_INTERVAL_MS = 10 * 60 * 1000L
         private const val BLOCK_COOLDOWN_MS = 800L
         private const val REEL_CHECK_THROTTLE_MS = 500L
-        private const val REEL_SUPPRESS_DURATION_MS = 60 * 60 * 1000L
+        /** "Ana Sayfaya Dön" sonrası reel tespitinin susturulacağı grace süresi. App-içi Home'a
+         *  geçiş anlık değil (~1s animasyon); bu pencere olmadan reel hâlâ ağaçtayken tespit edilip
+         *  anında yeniden bloklanır → sonsuz döngü (cihaz teşhisiyle doğrulandı). Grace bitince
+         *  normal tespit döner: reels'e yeniden girilirse yine bloklanır. */
+        private const val REEL_HOME_GRACE_MS = 2500L
         /** Foreground'daki app'i periyodik limit kontrolü için tik aralığı (madde 25/13). */
         private const val IN_APP_CHECK_INTERVAL_MS = 30 * 1000L
 
@@ -119,6 +128,8 @@ class AppAccessibilityService : AccessibilityService() {
     private val dailyUsageMs          = ConcurrentHashMap<String, Long>()
     @Volatile private var currentPackage: String? = null
     @Volatile private var sessionStartMs: Long    = 0L
+    /** dailyUsageMs birikiminin ait olduğu günün başlangıcı — gece yarısı sızıntısını önler (madde 27). */
+    @Volatile private var usageDayStart: Long     = 0L
 
     // ─── Limit Cache ──────────────────────────────────────────────────────────
     private val limitsCache = ConcurrentHashMap<String, AppLimit>()
@@ -131,9 +142,17 @@ class AppAccessibilityService : AccessibilityService() {
     private val reelUsageMs = ConcurrentHashMap<String, Long>()
     @Volatile private var reelContentStartMs: Long? = null
     @Volatile private var reelContentPackage: String? = null
-    private val reelSuppressUntilMs = ConcurrentHashMap<String, Long>()
     @Volatile private var reelUsageDayStart: Long = 0L
     @Volatile private var lastReelCheckMs: Long = 0L
+    /** "Ana Sayfaya Dön" sonrası reel tespitinin susturulacağı zaman damgası (bkz. REEL_HOME_GRACE_MS). */
+    @Volatile private var reelHomeGraceUntilMs: Long = 0L
+
+    // ─── Oturum Sorusu ("girişte süre sor") State — in-memory, spec: 2026-07-17 ─
+    private val sessionRemainingMs = ConcurrentHashMap<String, Long>()
+    private val sessionLastExitMs  = ConcurrentHashMap<String, Long>()
+    @Volatile private var activeSessionPackage: String? = null
+    @Volatile private var activeSessionStartMs: Long = 0L
+    private var sessionExpiryJob: Job? = null
 
     // ─── Overlay State ────────────────────────────────────────────────────────
     private var windowManager: WindowManager? = null
@@ -153,7 +172,17 @@ class AppAccessibilityService : AccessibilityService() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == Intent.ACTION_SCREEN_OFF) {
                 Log.d(TAG, "Screen OFF → flushing to DB")
+                commitReelSession()
                 commitCurrentSession()
+                // Ekran kilidi de "uygulamadan çıkış" sayılır: bütçe düşülür, grace penceresi başlar
+                pauseActiveSession(switchingTo = null, now = System.currentTimeMillis())
+                // Ekran kapandı = foreground oturumu bitti. currentPackage açık bırakılırsa
+                // periyodik flush (10dk) kilitli geçen tüm süreyi foreground kullanım sanıp
+                // saymaya devam eder (gece boyu +saatler); DailySyncWorker'ın maxOf-reconcile'ı
+                // bu şişkin değeri asla düşüremez. Kilit açılınca app'in window-state event'i
+                // oturumu yeniden başlatır (eksik kalırsa OS reconcile tamamlar — güvenli yön).
+                currentPackage = null
+                sessionStartMs = 0L
                 flushToDB()
             }
         }
@@ -167,6 +196,7 @@ class AppAccessibilityService : AccessibilityService() {
         userPrefs     = UserPreferences(this)
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         reelUsageDayStart = getTodayStartMs()
+        usageDayStart     = getTodayStartMs()
 
         loadTodayUsageFromDB()
         observeLimitsCache()
@@ -189,6 +219,7 @@ class AppAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         flushJob?.cancel()
         inAppCheckJob?.cancel()
+        sessionExpiryJob?.cancel()
         unregisterReceiver(screenReceiver)
         commitCurrentSession()
         commitReelSession()
@@ -223,19 +254,25 @@ class AppAccessibilityService : AccessibilityService() {
         // Reel oturumu, ignore edilen pakete (launcher/Home) geçişte de kapanmalı — bu yüzden
         // shouldIgnorePackage guard'ından ÖNCE commit et. currentPackage değişmediyse hâlâ aynı
         // reel'deyiz, kapatma (aksi halde her state event'inde oturum yanlışlıkla biterdi).
-        if (newPackage != currentPackage) commitReelSession()
+        val now = System.currentTimeMillis()
+        if (newPackage != currentPackage) {
+            commitReelSession()
+            // Oturum bütçesi de ignore edilen pakete (launcher) geçişte duraklamalı —
+            // aksi halde Home'da geçen süre bütçeden düşerdi (reel-commit ile aynı gerekçe).
+            pauseActiveSession(switchingTo = newPackage, now = now)
+        }
 
         if (shouldIgnorePackage(newPackage)) return
         if (newPackage == currentPackage) return
 
-        val now = System.currentTimeMillis()
         commitSessionAt(now)
 
         currentPackage = newPackage
         sessionStartMs = now
         Log.d(TAG, "▶ Session started: $newPackage")
 
-        checkAndBlockIfNeeded(newPackage, now)
+        val blocked = checkAndBlockIfNeeded(newPackage, now)
+        if (!blocked) maybeHandleSessionEntry(newPackage, now)
     }
 
     // ═══════════════════════ Session Management ════════════════════════════════
@@ -257,16 +294,17 @@ class AppAccessibilityService : AccessibilityService() {
 
     // ═══════════════════════ Blocking Logic ════════════════════════════════════
 
-    private fun checkAndBlockIfNeeded(packageName: String, now: Long) {
+    /** @return true ise bu paket bloklu (overlay zaten görünüyor ya da şimdi tetiklendi). */
+    private fun checkAndBlockIfNeeded(packageName: String, now: Long): Boolean {
         // Bu paket için overlay zaten gösteriliyorsa tekrar tetikleme
-        if (blockedOverlayPackage == packageName) return
+        if (blockedOverlayPackage == packageName) return true
         // Çok kısa aralıklı yinelenen event'lere karşı debounce (gerçek çıkış-giriş bunu aşar)
         if (packageName == lastBlockedPackage && now - lastBlockedTime < BLOCK_COOLDOWN_MS) {
             Log.d(TAG, "Debounce aktif: $packageName")
-            return
+            return false
         }
-        val limit = limitsCache[packageName] ?: return
-        if (!limit.isTimeLimitEnabled && !limit.isScheduleEnabled) return
+        val limit = limitsCache[packageName] ?: return false
+        if (!limit.isTimeLimitEnabled && !limit.isScheduleEnabled) return false
 
         if (limit.isTimeLimitEnabled && limit.dailyLimitMinutes > 0) {
             // Henüz commit edilmemiş (mevcut oturumdaki) süreyi de say — yoksa periyodik
@@ -279,7 +317,7 @@ class AppAccessibilityService : AccessibilityService() {
             Log.d(TAG, "${limit.appName}: $usedMinutes/${limit.dailyLimitMinutes} dk")
             if (usedMinutes >= limit.dailyLimitMinutes) {
                 triggerBlock(packageName, limit.appName, "Günlük limit (${limit.dailyLimitMinutes}dk) doldu")
-                return
+                return true
             }
         }
 
@@ -291,9 +329,13 @@ class AppAccessibilityService : AccessibilityService() {
                 val start = limit.blockStartHour * 60 + limit.blockStartMinute
                 val end   = limit.blockEndHour   * 60 + limit.blockEndMinute
                 val blocked = if (start <= end) cur in start..end else cur >= start || cur <= end
-                if (blocked) triggerBlock(packageName, limit.appName, "Zamanlama engeli aktif")
+                if (blocked) {
+                    triggerBlock(packageName, limit.appName, "Zamanlama engeli aktif")
+                    return true
+                }
             }
         }
+        return false
     }
 
     private fun triggerBlock(packageName: String, appName: String, reason: String) {
@@ -313,6 +355,9 @@ class AppAccessibilityService : AccessibilityService() {
         // Throttle, pahalı işlerden (SharedPreferences okuması + node ağacı taraması) ÖNCE —
         // hızlı kaydırmada content-changed event'i çok sık ateşlenir, gereksiz işi keser.
         val now = System.currentTimeMillis()
+        // "Ana Sayfaya Dön" grace penceresi: app home'a geçerken reel hâlâ ağaçta olabilir; tespit
+        // etmeyip döngüyü önle (bkz. REEL_HOME_GRACE_MS).
+        if (now < reelHomeGraceUntilMs) return
         if (now - lastReelCheckMs < REEL_CHECK_THROTTLE_MS) return
         lastReelCheckMs = now
 
@@ -356,8 +401,6 @@ class AppAccessibilityService : AccessibilityService() {
     }
 
     private fun evaluateReelBlock(pkg: String, now: Long) {
-        if (isReelBlockSuppressed(reelSuppressUntilMs[pkg] ?: 0L, now)) return
-
         when (reelBlockModeFor(pkg)) {
             ReelBlockMode.INSTANT -> triggerReelBlock(pkg)
             ReelBlockMode.BUDGET -> {
@@ -403,11 +446,31 @@ class AppAccessibilityService : AccessibilityService() {
                 packageName = packageName,
                 appName = appName,
                 reason = "Sonsuz kaydırma sınırı",
-                onAllowTemporarily = {
-                    reelSuppressUntilMs[packageName] = System.currentTimeMillis() + REEL_SUPPRESS_DURATION_MS
-                }
+                onGoToAppHome = { navigateToAppHome(packageName) }
             )
         }
+    }
+
+    /** Reel bloğundan çıkış: kullanıcıyı reels/shorts yüzeyinden çıkarmak için sistem GERİ event'i
+     *  gönderir. Instagram/YouTube back-stack'i Home sekmesinde köklendiğinden reels/shorts sekmesinden
+     *  GERİ → uygulamanın Ana Sayfa feed'ine iner (home feed reel-oynatıcı dizesiyle eşleşmez → döngü yok).
+     *
+     *  Neden ACTION_CLICK/gesture-tap DEĞİL: ACTION_CLICK Instagram'da no-op (Litho sanal node'lar),
+     *  alt-nav node bounds'una gesture-tap ise iki app'te de güvenilmez çıktı (reel sabit kaldı / yanlış
+     *  video açıldı) — cihaz teşhisiyle doğrulandı. GLOBAL_ACTION_BACK gerçek sistem event'i, ikisinde de
+     *  onurlandırılır ve koordinat/tıklanabilirlik sorunlarını bypass eder.
+     *
+     *  currentPackage'ı geri yükler: removeOverlayInternal onu null'lar (app-limit bloğu için: uygulamadan
+     *  çıkış → yeni giriş event'i sıfırlar). Ama app-içi geçişte paket sınırı geçilmez, WINDOW_STATE_CHANGED
+     *  tetiklenmez → null kalırsa checkReelContent hep erken döner, kullanıcı reels'e geri girince
+     *  bloklanmazdı (cihaz teşhisiyle doğrulandı). */
+    private fun navigateToAppHome(pkg: String) {
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        val now = System.currentTimeMillis()
+        commitReelSession(now)              // reels'ten çıkıldı → oturumu kapat (bütçe modu için)
+        reelHomeGraceUntilMs = now + REEL_HOME_GRACE_MS
+        currentPackage = pkg
+        sessionStartMs = now
     }
 
     // ═══════════════════════ Accessibility Overlay ════════════════════════════
@@ -425,7 +488,7 @@ class AppAccessibilityService : AccessibilityService() {
         packageName: String,
         appName: String,
         reason: String,
-        onAllowTemporarily: (() -> Unit)? = null
+        onGoToAppHome: (() -> Unit)? = null
     ) {
         // Zaten bir overlay varsa önce kaldır
         if (overlayView != null) removeOverlayInternal()
@@ -452,18 +515,22 @@ class AppAccessibilityService : AccessibilityService() {
             setViewTreeViewModelStoreOwner(lifecycleOwner)
 
             setContent {
+                // Reel bloğunda (onGoToAppHome != null) buton kullanıcıyı uygulamanın kendi Ana
+                // Sayfa'sına gönderir. App-limit/oturum bloğunda tüm uygulama engelli olduğu için
+                // Android launcher'a (GLOBAL_ACTION_HOME) gönderir — orada app-içi Home anlamsız.
+                val goToAppHome = onGoToAppHome
                 BlockingOverlayContent(
-                    appName   = appName,
+                    appName     = appName,
                     packageName = packageName,
-                    reason    = reason,
-                    onGoHome  = {
-                        removeOverlay()
-                        performGlobalAction(GLOBAL_ACTION_HOME)
-                    },
-                    onAllowTemporarily = onAllowTemporarily?.let { callback ->
-                        {
-                            callback()
+                    reason      = reason,
+                    primaryLabel = if (goToAppHome != null) "Ana Sayfaya Dön" else "Ana Ekrana Dön",
+                    onPrimary   = {
+                        if (goToAppHome != null) {
+                            removeOverlayInternal()  // main thread'deyiz; sync kaldır → node ağacı app'e döner
+                            goToAppHome()
+                        } else {
                             removeOverlay()
+                            performGlobalAction(GLOBAL_ACTION_HOME)
                         }
                     }
                 )
@@ -477,6 +544,63 @@ class AppAccessibilityService : AccessibilityService() {
             Log.d(TAG, "✅ Overlay gösterildi: $appName")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Overlay eklenemedi", e)
+            lifecycleOwner.destroy()
+            overlayOwner = null
+            blockedOverlayPackage = null
+        }
+    }
+
+    /** Girişte "bu oturumda kaç dakika?" sorusu — blok overlay'i ile aynı pencere altyapısı.
+     *  blockedOverlayPackage set edilir (tek-overlay değişmezi): reel taraması ve tekrar-blok
+     *  soru görünürken susar. Not: removeOverlayInternal currentPackage'ı null'lar — "Başla"
+     *  sonrası uygulamanın ilk window-state event'i takibi yeniden başlatır
+     *  (activeSessionPackage == pkg olduğu için soru tekrar gelmez). */
+    private fun showSessionPromptOverlay(packageName: String, appName: String) {
+        if (overlayView != null) removeOverlayInternal()
+
+        blockedOverlayPackage = packageName
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        )
+
+        val lifecycleOwner = ServiceLifecycleOwner()
+        overlayOwner = lifecycleOwner
+
+        val composeView = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(lifecycleOwner)
+            setViewTreeSavedStateRegistryOwner(lifecycleOwner)
+            setViewTreeViewModelStoreOwner(lifecycleOwner)
+
+            setContent {
+                SessionPromptOverlayContent(
+                    appName = appName,
+                    packageName = packageName,
+                    onStart = { minutes ->
+                        startSession(packageName, minutes)
+                        removeOverlay()
+                    },
+                    onDismiss = {
+                        removeOverlay()
+                        performGlobalAction(GLOBAL_ACTION_HOME)
+                    }
+                )
+            }
+        }
+
+        try {
+            lifecycleOwner.init()
+            windowManager?.addView(composeView, params)
+            overlayView = composeView
+            Log.d(TAG, "❓ Oturum sorusu gösterildi: $appName")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Oturum sorusu overlay'i eklenemedi", e)
             lifecycleOwner.destroy()
             overlayOwner = null
             blockedOverlayPackage = null
@@ -513,8 +637,8 @@ class AppAccessibilityService : AccessibilityService() {
         appName: String,
         packageName: String,
         reason: String,
-        onGoHome: () -> Unit,
-        onAllowTemporarily: (() -> Unit)? = null
+        primaryLabel: String,
+        onPrimary: () -> Unit
     ) {
         Box(
             modifier = Modifier
@@ -582,9 +706,9 @@ class AppAccessibilityService : AccessibilityService() {
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Go Home button
+                // Ana Sayfa/Ana Ekran butonu
                 Button(
-                    onClick  = onGoHome,
+                    onClick  = onPrimary,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(52.dp),
@@ -594,21 +718,135 @@ class AppAccessibilityService : AccessibilityService() {
                     )
                 ) {
                     Text(
-                        text       = "Ana Ekrana Dön",
+                        text       = primaryLabel,
+                        fontSize   = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color      = Color.White
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun SessionPromptOverlayContent(
+        appName: String,
+        packageName: String,
+        onStart: (Int) -> Unit,
+        onDismiss: () -> Unit
+    ) {
+        var selectedMinutes by remember { mutableIntStateOf(15) }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color(0xFF0A0A12), Color(0xFF12091F))
+                    )
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            // Arka plan dekoratif çember (blok overlay'i ile aynı görsel dil)
+            Box(
+                modifier = Modifier
+                    .size(300.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF3B0764).copy(alpha = 0.25f))
+            )
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.padding(horizontal = 32.dp)
+            ) {
+                RealAppIcon(
+                    packageName  = packageName,
+                    appName      = appName,
+                    size         = 72.dp,
+                    cornerRadius = 18.dp
+                )
+
+                Text(
+                    text       = appName,
+                    color      = Color.White,
+                    fontSize   = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign  = TextAlign.Center
+                )
+
+                Text(
+                    text      = "Bu oturumda ne kadar kullanacaksın?",
+                    color     = Color(0xFF9CA3AF),
+                    fontSize  = 14.sp,
+                    textAlign = TextAlign.Center
+                )
+
+                // Hazır seçenekler
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SESSION_PRESET_MINUTES.forEach { mins ->
+                        val isSelected = selectedMinutes == mins
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (isSelected) Color(0xFF7C3AED)
+                                    else Color(0xFF7C3AED).copy(alpha = 0.15f)
+                                )
+                                .clickable { selectedMinutes = mins }
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text(
+                                text       = "${mins}dk",
+                                color      = if (isSelected) Color.White else Color(0xFFC084FC),
+                                fontSize   = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+
+                // Özel değer (stepper — klavye yok, FLAG_NOT_FOCUSABLE ile çakışmaz)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = {
+                        selectedMinutes = clampSessionMinutes(selectedMinutes - 5)
+                    }) { Text("−", color = Color(0xFFC084FC), fontSize = 22.sp) }
+                    Text(
+                        text       = "$selectedMinutes dk",
+                        color      = Color.White,
+                        fontSize   = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier   = Modifier.padding(horizontal = 12.dp)
+                    )
+                    TextButton(onClick = {
+                        selectedMinutes = clampSessionMinutes(selectedMinutes + 5)
+                    }) { Text("+", color = Color(0xFFC084FC), fontSize = 22.sp) }
+                }
+
+                Button(
+                    onClick  = { onStart(selectedMinutes) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                    shape    = RoundedCornerShape(14.dp),
+                    colors   = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF7C3AED)
+                    )
+                ) {
+                    Text(
+                        text       = "Başla",
                         fontSize   = 15.sp,
                         fontWeight = FontWeight.SemiBold,
                         color      = Color.White
                     )
                 }
 
-                if (onAllowTemporarily != null) {
-                    TextButton(onClick = onAllowTemporarily) {
-                        Text(
-                            text     = "1 saat izin ver",
-                            fontSize = 13.sp,
-                            color    = Color(0xFF9CA3AF)
-                        )
-                    }
+                TextButton(onClick = onDismiss) {
+                    Text(
+                        text     = "Kullanmayacağım",
+                        fontSize = 13.sp,
+                        color    = Color(0xFF9CA3AF)
+                    )
                 }
             }
         }
@@ -618,13 +856,21 @@ class AppAccessibilityService : AccessibilityService() {
 
     private fun loadTodayUsageFromDB() {
         serviceScope.launch(Dispatchers.IO) {
-            try {
-                val logs = db.appUsageDao().getUsageLogsForDate(getTodayStartMs()).first()
-                logs.forEach { dailyUsageMs[it.packageName] = it.durationMs }
-                _liveUsageFlow.value = HashMap(dailyUsageMs)
-                Log.d(TAG, "📥 DB'den ${logs.size} kayıt yüklendi")
-            } catch (e: Exception) { Log.e(TAG, "DB yükleme hatası", e) }
+            val today = getTodayStartMs()
+            usageDayStart = today
+            seedDailyUsageFromDB(today)
         }
+    }
+
+    /** dailyUsageMs'i verilen günün DB kayıtlarından (DailySyncWorker OS reconcile) yeniden tohumlar. */
+    private suspend fun seedDailyUsageFromDB(dayStart: Long) {
+        try {
+            val logs = db.appUsageDao().getUsageLogsForDate(dayStart).first()
+            dailyUsageMs.clear()
+            logs.forEach { dailyUsageMs[it.packageName] = it.durationMs }
+            _liveUsageFlow.value = HashMap(dailyUsageMs)
+            Log.d(TAG, "📥 DB'den ${logs.size} kayıt yüklendi (gün=$dayStart)")
+        } catch (e: Exception) { Log.e(TAG, "DB yükleme hatası", e) }
     }
 
     private fun observeLimitsCache() {
@@ -671,27 +917,113 @@ class AppAccessibilityService : AccessibilityService() {
                 delay(IN_APP_CHECK_INTERVAL_MS)
                 val pkg = currentPackage ?: continue
                 if (blockedOverlayPackage == pkg) continue // zaten bloklu, tekrar tetikleme
+                checkActiveSessionExpiry(System.currentTimeMillis()) // oturum bütçesi emniyet ağı
                 if (limitsCache[pkg] == null) continue     // limitsiz app, iş yok
                 checkAndBlockIfNeeded(pkg, System.currentTimeMillis())
             }
         }
     }
 
+    // ═══════════════════════ Oturum Sorusu (girişte süre sor) ══════════════════
+
+    /** Aktif oturumu duraklatır: geçen süreyi bütçeden düşer, çıkış anını işaretler. */
+    private fun pauseActiveSession(switchingTo: String?, now: Long) {
+        val pkg = activeSessionPackage ?: return
+        if (pkg == switchingTo) return
+        sessionExpiryJob?.cancel()
+        val remaining = sessionRemainingMs[pkg] ?: 0L
+        sessionRemainingMs[pkg] = deductSessionBudget(remaining, now - activeSessionStartMs)
+        sessionLastExitMs[pkg] = now
+        activeSessionPackage = null
+        Log.d(TAG, "⏸ Oturum duraklatıldı: $pkg, kalan=${sessionRemainingMs[pkg]}ms")
+    }
+
+    /** Girişte: soru göster ya da grace içindeki oturuma kaldığı yerden devam et. */
+    private fun maybeHandleSessionEntry(pkg: String, now: Long) {
+        if (blockedOverlayPackage != null) return
+        val limit = limitsCache[pkg] ?: return
+        if (!limit.isSessionPromptEnabled) return
+        if (activeSessionPackage == pkg) return
+
+        if (shouldPromptForSession(sessionRemainingMs[pkg], sessionLastExitMs[pkg], now)) {
+            sessionRemainingMs.remove(pkg)
+            sessionLastExitMs.remove(pkg)
+            val appName = AppInfoUtils.getAppName(this, pkg)
+            mainHandler.post { showSessionPromptOverlay(pkg, appName) }
+        } else {
+            resumeSession(pkg, now)
+        }
+    }
+
+    private fun resumeSession(pkg: String, now: Long) {
+        activeSessionPackage = pkg
+        activeSessionStartMs = now
+        scheduleSessionExpiry(pkg, sessionRemainingMs[pkg] ?: 0L)
+        Log.d(TAG, "▶ Oturum aktif: $pkg, kalan=${sessionRemainingMs[pkg]}ms")
+    }
+
+    /** "Başla" butonundan: seçilen dakika ile yeni oturum. */
+    private fun startSession(pkg: String, minutes: Int) {
+        sessionRemainingMs[pkg] = clampSessionMinutes(minutes) * 60_000L
+        sessionLastExitMs.remove(pkg)
+        resumeSession(pkg, System.currentTimeMillis())
+    }
+
+    /** Kalan süre dolduğu anda blok gelsin diye tam süreye zamanlanmış tek atımlık kontrol
+     *  (30 sn'lik in-app tick tek başına blok'u ortalama 15 sn geciktirirdi). */
+    private fun scheduleSessionExpiry(pkg: String, remainingMs: Long) {
+        sessionExpiryJob?.cancel()
+        if (isSessionExpired(remainingMs)) { expireSession(pkg); return }
+        sessionExpiryJob = serviceScope.launch {
+            delay(remainingMs + 1_000L)
+            checkActiveSessionExpiry(System.currentTimeMillis())
+        }
+    }
+
+    private fun checkActiveSessionExpiry(now: Long) {
+        val pkg = activeSessionPackage ?: return
+        val liveRemaining = (sessionRemainingMs[pkg] ?: 0L) - (now - activeSessionStartMs)
+        if (isSessionExpired(liveRemaining)) expireSession(pkg)
+    }
+
+    /** Süre doldu: state temizlenir (yeni oturum = bilinçli yeniden giriş), mevcut blok yolu tetiklenir. */
+    private fun expireSession(pkg: String) {
+        sessionExpiryJob?.cancel()
+        activeSessionPackage = null
+        sessionRemainingMs.remove(pkg)
+        sessionLastExitMs.remove(pkg)
+        triggerBlock(pkg, AppInfoUtils.getAppName(this, pkg), "Oturum süresi doldu")
+    }
+
     private suspend fun flushToDBSuspend() {
-        if (dailyUsageMs.isEmpty()) return
-        try {
-            val today = getTodayStartMs()
-            val logs  = dailyUsageMs.entries.map { (pkg, ms) ->
-                UsageLog(
-                    packageName = pkg,
-                    appName     = AppInfoUtils.getAppName(this@AppAccessibilityService, pkg),
-                    date        = today,
-                    durationMs  = ms
-                )
-            }
-            db.appUsageDao().upsertDurations(logs)
-            Log.d(TAG, "💾 DB flush: ${logs.size} kayıt")
-        } catch (e: Exception) { Log.e(TAG, "DB flush hatası", e) }
+        val today = getTodayStartMs()
+        // Birikim, usageDayStart gününe aittir (henüz başlatılmadıysa bugüne). Sabit "today" yazmak
+        // gece yarısını aşan servis için dünün toplamını bugünün kovasına sızdırırdı (madde 27).
+        val bucketDay = usageDayStart.takeIf { it > 0L } ?: today
+
+        if (dailyUsageMs.isNotEmpty()) {
+            try {
+                val logs = dailyUsageMs.entries.map { (pkg, ms) ->
+                    UsageLog(
+                        packageName = pkg,
+                        appName     = AppInfoUtils.getAppName(this@AppAccessibilityService, pkg),
+                        date        = bucketDay,
+                        durationMs  = ms
+                    )
+                }
+                db.appUsageDao().upsertDurations(logs)
+                Log.d(TAG, "💾 DB flush: ${logs.size} kayıt (gün=$bucketDay)")
+            } catch (e: Exception) { Log.e(TAG, "DB flush hatası", e) }
+        }
+
+        // Gece yarısı geçildiyse önceki günün birikimi yukarıda kendi gününe yazıldı; şimdi birikimi
+        // sıfırla ve yeni günü DB'den (DailySyncWorker OS reconcile) yeniden tohumla ki dünün toplamı
+        // bugüne taşınmasın. seedDailyUsageFromDB clear() de yapar.
+        if (bucketDay != today) {
+            usageDayStart = today
+            seedDailyUsageFromDB(today)
+            Log.d(TAG, "🌅 Gün döndü ($bucketDay → $today): birikim sıfırlandı")
+        }
     }
 
     // ═══════════════════════ Helpers ══════════════════════════════════════════

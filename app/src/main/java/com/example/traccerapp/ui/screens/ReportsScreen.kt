@@ -71,7 +71,7 @@ fun ReportsScreen() {
     val db = remember { AppDatabase.getDatabase(context) }
     val prefs = remember { UserPreferences(context) }
 
-    val today = remember { startOfDay(System.currentTimeMillis()) }
+    val today = rememberTodayStart() // gece yarısında güncellenir (madde 27)
     val todayWeekStart = remember(today) { mondayOfWeek(today) }
     val todayPageIndex = PAST_WEEKS
 

@@ -8,6 +8,7 @@ import com.example.traccerapp.data.AppDatabase
 import com.example.traccerapp.data.UsageLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.*
@@ -102,7 +103,10 @@ object UsageStatsUtils {
                     if (duration > 0 && usageStat.lastTimeUsed >= startOfDay && AppIconUtils.shouldTrack(context, packageName)) {
                         // Eğer queryEvents'ten veri yoksa, bu verileri de birleştir
                         if (packageName !in aggregationMap) {
-                            aggregationMap[packageName] = duration
+                            // Sorgu dünü de kapsıyor: dünün INTERVAL_DAILY bucket'ı (gece yarısını
+                            // aşan oturumda lastTimeUsed bugüne sarkabilir) dünün toplamını bugüne
+                            // yazabilir. Bugünün kullanımı gece yarısından beri geçen süreyi aşamaz.
+                            aggregationMap[packageName] = minOf(duration, now - startOfDay)
                             Log.d(TAG, "QueryUsageStats'tan eklendi: $packageName = $duration ms")
                         } else {
                             // queryEvents'te daha fazla veri varsa, onu kullan
@@ -134,21 +138,31 @@ object UsageStatsUtils {
             Log.d(TAG, "  - ${log.appName} (${log.packageName}): ${log.durationMs} ms")
         }
         
-        // ─── 4. DB'ye kaydet
+        // ─── 4. DB'ye kaydet (maxOf reconcile — DailySyncWorker ile aynı politika)
+        // Düz REPLACE, AppAccessibilityService'in event-driven biriktirdiği daha yüksek değeri
+        // OS'in daha düşük değeriyle ezebiliyordu; sonraki servis flush'ı geri yazınca Dashboard
+        // değerleri iki kaynak arasında gidip geliyordu. DB'deki > OS ise DB korunur.
         Log.d(TAG, "4. DB'ye kaydediliyor...")
+        var finalLogs = liveLogs
         if (liveLogs.isNotEmpty()) {
             try {
                 val db = AppDatabase.getDatabase(context)
-                db.appUsageDao().insertUsageLogs(liveLogs)
-                Log.d(TAG, "✓ Başarıyla ${liveLogs.size} log kaydedildi")
+                val existing = db.appUsageDao().getUsageLogsForDate(startOfDay).first()
+                    .associateBy { it.packageName }
+                finalLogs = liveLogs.map { log ->
+                    val dbMs = existing[log.packageName]?.durationMs ?: 0L
+                    if (dbMs > log.durationMs) log.copy(durationMs = dbMs) else log
+                }
+                db.appUsageDao().upsertDurations(finalLogs)
+                Log.d(TAG, "✓ Başarıyla ${finalLogs.size} log kaydedildi")
             } catch (e: Exception) {
                 Log.e(TAG, "✗ DB kayıt hatası", e)
             }
         } else {
             Log.w(TAG, "⚠ Kaydedilecek log yok!")
         }
-        
+
         Log.d(TAG, "===== fetchAndSaveUsageStats bitti =====")
-        return@withContext liveLogs.sortedByDescending { it.durationMs }
+        return@withContext finalLogs.sortedByDescending { it.durationMs }
     }
 }
